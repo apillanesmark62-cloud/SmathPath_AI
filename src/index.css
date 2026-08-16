@@ -1,0 +1,15 @@
+/* Minimal page reset. All component styling lives in the <Styles> block
+   inside SmartPath.jsx, scoped under .sp-root. */
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  background: #e9edf2;
+  -webkit-text-size-adjust: 100%;
+}

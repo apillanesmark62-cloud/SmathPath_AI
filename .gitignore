@@ -1,0 +1,14 @@
+node_modules
+dist
+.netlify
+
+# Never commit the API key
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+.DS_Store
+.vscode
+.idea
