@@ -51,9 +51,14 @@ city's schools come first.
 
 Anything not on a list can still be typed in freely, and is saved as typed.
 That matters, because `src/data/places.js` holds all 227 Philippine cities and
-provinces but only ~167 well-known senior high schools and universities — the
-country has thousands, so the school list is a shortcut, not a registry. Add
-entries to `PH_SCHOOLS` under the matching city group to extend it.
+provinces but only ~190 senior high schools and universities — the country has
+thousands, so the school list is a shortcut, not a registry. Add entries to
+`PH_SCHOOLS` under the matching city group to extend it.
+
+Two cities are named San Fernando, so both are listed under their official
+name with the province in brackets — `City of San Fernando (La Union)` and
+`City of San Fernando (Pampanga)` — and each has its own school group. They
+sort under "C", but typing "san fernando" finds either one.
 
 ### Career match
 
