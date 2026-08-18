@@ -1062,8 +1062,11 @@ function ResumeTab({ profile, resume, setResume, built, setBuilt, chosen, save }
           "\nWork or volunteer: " + (resume.experienceRaw || "none") +
           "\nAchievements: " + (resume.achievementsRaw || "none") +
           "\n\nReturn JSON only:\n" +
-          '{"objective":"2 sentences, first person, no clichés","skills":["6-9 short skills"],"experience":["past-tense bullet"],"activities":["past-tense bullet"],"achievements":["short bullet"]}\n' +
-          "Each bullet starts with a strong verb, under 20 words. Empty array for anything they left blank.",
+          '{"objective":"2 sentences, first person, no clichés","skills":["6-9 specific skills"],"experience":["past-tense bullet"],"activities":["past-tense bullet"],"achievements":["short bullet"]}\n' +
+          "Each bullet starts with a strong verb, under 20 words. Empty array for anything they left blank.\n" +
+          "For skills, keep the detail they gave: name the tool and what they do with it " +
+          "(\"Canva poster and tarpaulin layouts\", not \"Canva\"). Do not shorten a specific skill " +
+          "down to a bare app name, and do not add detail they did not write.",
         "You write clean, honest, entry-level resumes. You never fabricate experience. Plain language, no buzzwords."
       );
       setBuilt(out);
@@ -1105,9 +1108,9 @@ function ResumeTab({ profile, resume, setResume, built, setBuilt, chosen, save }
           <Field label="Honors or academic standing" hint="Leave blank if none. That is normal.">
             <input className="sp-input" value={resume.honors} onChange={(e) => set("honors", e.target.value)} placeholder="With Honors, SY 2024-2025" />
           </Field>
-          <Field label="Skills" hint="Apps, tools, languages, anything you can actually do.">
-            <textarea className="sp-input sp-textarea" rows={2} value={resume.skillsRaw} onChange={(e) => set("skillsRaw", e.target.value)}
-              placeholder="Canva, Excel, video editing, Filipino and English, public speaking" />
+          <Field label="Skills" hint="Name the tool and what you do with it, not just the app name.">
+            <textarea className="sp-input sp-textarea" rows={4} value={resume.skillsRaw} onChange={(e) => set("skillsRaw", e.target.value)}
+              placeholder="Canva poster and tarpaulin layouts, Excel formulas and charts, video editing in CapCut, Filipino and English, public speaking" />
           </Field>
           <Field label="Activities, clubs, positions" hint="School organizations, church, sports, barangay, online communities.">
             <textarea className="sp-input sp-textarea" rows={3} value={resume.activitiesRaw} onChange={(e) => set("activitiesRaw", e.target.value)}
