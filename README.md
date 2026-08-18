@@ -12,11 +12,58 @@ key so it never reaches the browser.
 index.html                  page shell
 src/main.jsx                React entry point
 src/SmartPath.jsx           the whole app (UI, styles, logic)
+src/data/places.js          Philippine cities, provinces and schools for the pickers
 src/index.css               minimal page reset
 netlify/functions/chat.mjs  server-side AI endpoint (holds the API key)
 vite.config.js              build config + /api/chat middleware for `npm run dev`
 netlify.toml                build, routing and header config for Netlify
 ```
+
+## Features
+
+### Dark mode
+
+The toggle sits in the top-right of the homepage hero. The choice is saved per
+device under `smartpath:theme` and survives sign-out; on a first visit the app
+follows the operating system's `prefers-color-scheme`.
+
+Dark mode is driven entirely by CSS custom properties — `data-theme="dark"` on
+the root swaps a block of tokens and no layout rule is duplicated. When adding
+styles, use the tokens rather than literal colours:
+
+| Token | Use it for |
+| --- | --- |
+| `--ink`, `--ink-soft` | text |
+| `--paper`, `--card` | page and card surfaces |
+| `--panel`, `--on-panel` | the navy panel that stays dark in both themes (rail, hero, primary buttons) |
+| `--line`, `--track`, `--chip` | borders, meter tracks, chip fills |
+| `--warm-*`, `--err-*` | notice and error blocks |
+
+The resume preview is deliberately exempt — it renders as a white sheet with
+dark text in both themes, because it is a preview of a printed page.
+
+### City and school pickers
+
+The **City or province** and **School** fields on the profile and resume forms
+are comboboxes: click one and the whole list opens, typing narrows it, and
+arrow keys plus Enter work. Picking a city re-sorts the school list so that
+city's schools come first.
+
+Anything not on a list can still be typed in freely, and is saved as typed.
+That matters, because `src/data/places.js` holds all 227 Philippine cities and
+provinces but only ~167 well-known senior high schools and universities — the
+country has thousands, so the school list is a shortcut, not a registry. Add
+entries to `PH_SCHOOLS` under the matching city group to extend it.
+
+### Career match
+
+Suggestions are sorted best-fit first, with the path the student chose pinned
+to the top. Each card carries a fit label (Strong fit / Good fit / Worth
+exploring) and a route badge, and a compare strip above the cards puts all four
+fit scores side by side. The model is asked to tag each career with a `route`
+of `degree`, `short` (TESDA or a certificate) or `work`, which drives the
+"No 4-year degree needed" filter — so the students who cannot go straight to
+college can find their options in one click.
 
 ## Running it locally
 
@@ -95,7 +142,7 @@ plenty for these prompts; raise it if you want more considered answers.
 ## Storage
 
 Student work is saved in the browser's `localStorage` under keys prefixed
-`smartpath:`. If localStorage is unavailable (private browsing, storage
+`smartpath:` (the theme choice included). If localStorage is unavailable (private browsing, storage
 disabled) the app falls back to in-memory storage and works for that visit
 only.
 

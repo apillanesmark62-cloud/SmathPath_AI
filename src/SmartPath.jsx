@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { PH_LOCATIONS, PH_SCHOOLS, schoolsForCity } from "./data/places.js";
 
 /* ==========================================================
    SmartPath — AI-Powered Career Guidance & Resume Builder
@@ -151,6 +152,11 @@ function Icon({ name, size = 20 }) {
     star: <><path d="M12 3.5l2.7 5.5 6 .9-4.3 4.2 1 6-5.4-2.8-5.4 2.8 1-6L3.3 9.9l6-.9z" /></>,
     down: <><path d="M12 4v12M7 12l5 5 5-5M5 20h14" /></>,
     spark: <><path d="M12 3v5M12 16v5M3 12h5M16 12h5M6.3 6.3l3 3M14.7 14.7l3 3M17.7 6.3l-3 3M9.3 14.7l-3 3" /></>,
+    sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" /></>,
+    moon: <><path d="M20 13.5A8.5 8.5 0 0 1 10.5 4a8.5 8.5 0 1 0 9.5 9.5z" /></>,
+    caret: <><path d="M6 9l6 6 6-6" /></>,
+    pin: <><path d="M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z" /><circle cx="12" cy="10" r="2.6" /></>,
+    school: <><path d="M12 4l9 4.5-9 4.5-9-4.5z" /><path d="M6.5 11v5.2c0 .9 2.5 2.3 5.5 2.3s5.5-1.4 5.5-2.3V11" /></>,
   };
   return <svg {...p} aria-hidden="true">{paths[name]}</svg>;
 }
@@ -161,6 +167,158 @@ function Field({ label, hint, children }) {
     <label className="sp-field">
       <span className="sp-label">{label}</span>
       {children}
+      {hint ? <span className="sp-hint">{hint}</span> : null}
+    </label>
+  );
+}
+
+/* A combobox: click it and every option is listed, typing narrows the list,
+   and anything not on the list can still be typed in freely. Options arrive as
+   [{ group, items: [...] }] so long lists stay navigable. */
+function Picker({ label, hint, value, onChange, groups, placeholder, icon }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(null); // null = untouched, show everything
+  const [active, setActive] = useState(-1);
+  const wrapRef = useRef(null);
+  const listRef = useRef(null);
+
+  const filter = query === null ? "" : query.trim().toLowerCase();
+  const shown = [];
+  for (const g of groups) {
+    const items = filter ? g.items.filter((i) => i.toLowerCase().includes(filter)) : g.items;
+    if (items.length) shown.push({ group: g.group, items });
+  }
+  const flat = shown.flatMap((g) => g.items);
+
+  useEffect(() => {
+    if (!open) return;
+    function away(e) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || active < 0 || !listRef.current) return;
+    const el = listRef.current.querySelector('[data-idx="' + active + '"]');
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+  }, [active, open]);
+
+  function show() {
+    setOpen(true);
+    setQuery(null);
+    setActive(-1);
+    /* On a phone the field is often near the bottom of the screen, so nudge the
+       open list into view instead of leaving it behind the tab bar. */
+    setTimeout(() => {
+      if (listRef.current && listRef.current.scrollIntoView) {
+        listRef.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }, 0);
+  }
+
+  function pick(item) {
+    onChange(item);
+    setOpen(false);
+    setQuery(null);
+    setActive(-1);
+  }
+
+  function onKey(e) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) return show();
+      if (!flat.length) return;
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setActive((i) => (i + step + flat.length) % flat.length);
+    } else if (e.key === "Enter") {
+      if (open && active >= 0 && flat[active]) {
+        e.preventDefault();
+        pick(flat[active]);
+      } else {
+        setOpen(false);
+      }
+    } else if (e.key === "Escape") {
+      setOpen(false);
+      setActive(-1);
+    }
+  }
+
+  let idx = -1;
+
+  return (
+    <label className="sp-field sp-picker" ref={wrapRef}>
+      <span className="sp-label">{label}</span>
+      <div className="sp-picker-box">
+        {icon ? <span className="sp-picker-icon"><Icon name={icon} size={16} /></span> : null}
+        <input
+          className={"sp-input" + (icon ? " sp-input-iconed" : "")}
+          value={query === null ? value : query}
+          placeholder={placeholder}
+          autoComplete="off"
+          role="combobox"
+          aria-expanded={open}
+          aria-autocomplete="list"
+          onMouseDown={() => { if (!open) show(); }}
+          onFocus={show}
+          onKeyDown={onKey}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            onChange(e.target.value);
+            setOpen(true);
+            setActive(-1);
+          }}
+        />
+        <button
+          type="button"
+          className={"sp-picker-caret" + (open ? " is-open" : "")}
+          tabIndex={-1}
+          aria-label={open ? "Hide the list" : "Show the whole list"}
+          onMouseDown={(e) => { e.preventDefault(); open ? setOpen(false) : show(); }}
+        >
+          <Icon name="caret" size={16} />
+        </button>
+
+      {open ? (
+        <div className="sp-picker-list" ref={listRef} role="listbox">
+          {shown.length ? (
+            shown.map((g) => (
+              <div key={g.group} className="sp-picker-group">
+                <span className="sp-picker-grouphead">{g.group}</span>
+                {g.items.map((item) => {
+                  idx += 1;
+                  const here = idx;
+                  return (
+                    <button
+                      type="button"
+                      key={item}
+                      data-idx={here}
+                      role="option"
+                      aria-selected={item === value}
+                      className={
+                        "sp-picker-opt" +
+                        (here === active ? " is-active" : "") +
+                        (item === value ? " is-chosen" : "")
+                      }
+                      onMouseEnter={() => setActive(here)}
+                      onMouseDown={(e) => { e.preventDefault(); pick(item); }}
+                    >
+                      {item}
+                    </button>
+                  );
+                })}
+              </div>
+            ))
+          ) : (
+            <p className="sp-picker-none">
+              Nothing on the list matches that. Keep typing — your own answer is saved as you write it.
+            </p>
+          )}
+        </div>
+      ) : null}
+      </div>
+
       {hint ? <span className="sp-hint">{hint}</span> : null}
     </label>
   );
@@ -202,7 +360,7 @@ function Dial({ value, size = 58 }) {
   const r = (size - 9) / 2, c = 2 * Math.PI * r;
   return (
     <svg width={size} height={size} viewBox={"0 0 " + size + " " + size} className="sp-dial">
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#E1E7EE" strokeWidth="6" />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--track)" strokeWidth="6" />
       <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--route)" strokeWidth="6"
         strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - v / 100)}
         transform={"rotate(-90 " + size / 2 + " " + size / 2 + ")"} className="sp-dial-arc" />
@@ -239,7 +397,7 @@ function RouteMap({ done }) {
         fill="none" stroke="var(--signal)" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
       {stops.map((s, i) => (
         <g key={s.key} className="sp-routemap-stop" style={{ animationDelay: 0.5 + i * 0.13 + "s" }}>
-          <circle cx={s.x} cy={s.y} r="7.5" fill={done[s.key] ? "var(--route)" : "#16294A"} />
+          <circle cx={s.x} cy={s.y} r="7.5" fill={done[s.key] ? "var(--route)" : "var(--panel-dot)"} />
           <circle cx={s.x} cy={s.y} r="7.5" fill="none" stroke="#FFFFFF" strokeWidth="2.5" opacity={done[s.key] ? 1 : 0.5} />
           <text x={s.x} y={s.y + 24} textAnchor="middle" className="sp-routemap-label">{s.label}</text>
         </g>
@@ -371,7 +529,7 @@ function AuthScreen({ onSignedIn }) {
 }
 
 /* ---------------- overview ---------------- */
-function OverviewTab({ profile, careers, chosen, built, prep, practiced, done, setTab }) {
+function OverviewTab({ profile, careers, chosen, built, prep, practiced, done, setTab, theme, onToggleTheme }) {
   const steps = ["profile", "match", "resume", "interview", "advice"];
   const pct = Math.round((steps.filter((s) => done[s]).length / steps.length) * 100);
   const hour = new Date().getHours();
@@ -388,6 +546,16 @@ function OverviewTab({ profile, careers, chosen, built, prep, practiced, done, s
   return (
     <div className="sp-pane">
       <section className="sp-hero">
+        <button
+          className="sp-theme"
+          onClick={onToggleTheme}
+          aria-pressed={theme === "dark"}
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          <Icon name={theme === "dark" ? "sun" : "moon"} size={15} />
+          <span>{theme === "dark" ? "Light" : "Dark"}</span>
+        </button>
+
         <div className="sp-hero-text">
           <span className="sp-eyebrow sp-eyebrow-light">Your path</span>
           <h2 className="sp-hero-h">
@@ -468,9 +636,14 @@ function ProfileTab({ profile, setProfile, onSaved, goMatch }) {
         <Field label="Full name">
           <input className="sp-input" value={profile.fullName} onChange={(e) => set("fullName", e.target.value)} placeholder="Maria Santos" />
         </Field>
-        <Field label="School">
-          <input className="sp-input" value={profile.school} onChange={(e) => set("school", e.target.value)} placeholder="Name of your school" />
-        </Field>
+        <Picker
+          label="School"
+          icon="school"
+          value={profile.school}
+          onChange={(v) => set("school", v)}
+          groups={schoolsForCity(profile.location)}
+          placeholder="Click to see the list, or type your school"
+        />
         <Field label="Grade level">
           <select className="sp-input" value={profile.gradeLevel} onChange={(e) => set("gradeLevel", e.target.value)}>
             <option>Grade 11</option><option>Grade 12</option><option>Recently graduated</option>
@@ -484,9 +657,15 @@ function ProfileTab({ profile, setProfile, onSaved, goMatch }) {
             <option>Arts and Design</option><option>Sports</option><option>Other / not sure</option>
           </select>
         </Field>
-        <Field label="City or province" hint="Keeps suggestions realistic for where you are.">
-          <input className="sp-input" value={profile.location} onChange={(e) => set("location", e.target.value)} placeholder="e.g. Cebu City" />
-        </Field>
+        <Picker
+          label="City or province"
+          icon="pin"
+          hint="Keeps suggestions realistic for where you are, and sorts the school list."
+          value={profile.location}
+          onChange={(v) => set("location", v)}
+          groups={PH_LOCATIONS}
+          placeholder="Click to see every city and province"
+        />
         <Field label="After Senior High you plan to">
           <select className="sp-input" value={profile.afterSHS} onChange={(e) => set("afterSHS", e.target.value)}>
             <option>College</option><option>Work first</option>
@@ -531,10 +710,47 @@ function ProfileTab({ profile, setProfile, onSaved, goMatch }) {
 }
 
 /* ---------------- career match ---------------- */
+const ROUTES = {
+  degree: "4-year degree",
+  short: "TESDA or short course",
+  work: "Can start from work",
+};
+
+function fitLabel(n) {
+  if (n >= 85) return "Strong fit";
+  if (n >= 75) return "Good fit";
+  return "Worth exploring";
+}
+
+function fitTone(n) {
+  if (n >= 85) return "strong";
+  if (n >= 75) return "good";
+  return "open";
+}
+
+function slug(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
 function MatchTab({ profile, careers, setCareers, chosen, setChosen, roadmap, setRoadmap, save, goResume }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mapBusy, setMapBusy] = useState(false);
+  const [onlyNoDegree, setOnlyNoDegree] = useState(false);
+
+  /* Best fit first, and whichever path the student picked stays pinned at the
+     top so it does not slide out of view when they re-run the match. */
+  const ranked = careers
+    .map((c, i) => ({ ...c, order: i }))
+    .sort((a, b) => {
+      if (chosen && a.title === chosen) return -1;
+      if (chosen && b.title === chosen) return 1;
+      const d = (Number(b.fit) || 0) - (Number(a.fit) || 0);
+      return d !== 0 ? d : a.order - b.order;
+    });
+
+  const noDegreeCount = careers.filter((c) => c.route && c.route !== "degree").length;
+  const visible = onlyNoDegree ? ranked.filter((c) => c.route && c.route !== "degree") : ranked;
 
   async function run() {
     setBusy(true); setError("");
@@ -542,15 +758,21 @@ function MatchTab({ profile, careers, setCareers, chosen, setChosen, roadmap, se
       const out = await askJSON(
         "Suggest careers for this Senior High School student.\n\n" + profileLine(profile) +
           "\n\nReturn JSON only:\n" +
-          '{"careers":[{"title":"","fit":85,"why":"2 sentences using their own words","courses":["college course or TESDA/short course"],"skills":["skill to build now"],"firstJobs":["realistic entry-level role"],"reality":"one honest sentence about the hard part"}]}\n' +
+          '{"careers":[{"title":"","fit":85,"route":"degree","why":"2 sentences using their own words","courses":["college course or TESDA/short course"],"skills":["skill to build now"],"firstJobs":["realistic entry-level role"],"reality":"one honest sentence about the hard part"}]}\n' +
           "Exactly 4 careers. Fit numbers 60-95, all different. Keep strings short. " +
-          "Include at least one path that does not need a 4-year degree.",
+          '"route" is exactly one of: "degree" (needs a 4-year college degree), ' +
+          '"short" (TESDA, a certificate or a 2-year course), "work" (can start from an entry job or self-study).\n' +
+          "At least one career must have a route that is not \"degree\".",
         GUIDE_SYSTEM
       );
       const list = Array.isArray(out.careers) ? out.careers.slice(0, 4) : [];
       if (!list.length) throw new Error("No careers came back.");
       setCareers(list);
-      await save({ careers: list });
+      /* If the path they had chosen is not in the new set, clear the choice
+         rather than leaving the resume pointed at a career that is gone. */
+      const stillThere = list.some((c) => c.title === chosen);
+      if (chosen && !stillThere) setChosen("");
+      await save({ careers: list, chosen: stillThere ? chosen : "" });
     } catch (e) { setError(e.message || "Something went wrong reaching the AI service."); }
     setBusy(false);
   }
@@ -592,14 +814,67 @@ function MatchTab({ profile, careers, setCareers, chosen, setChosen, roadmap, se
           action="Match me to careers" onAction={run} />
       ) : null}
 
-      {careers.map((c, i) => {
+      {careers.length ? (
+        <>
+          {/* All four side by side, so the comparison is one glance rather than
+              a scroll through four cards. */}
+          <section className="sp-compare">
+            <span className="sp-chip-label">How they compare</span>
+            {ranked.map((c) => {
+              const on = chosen === c.title;
+              return (
+                <button
+                  key={c.title}
+                  className={"sp-compare-row" + (on ? " is-chosen" : "")}
+                  onClick={() => {
+                    const el = document.getElementById("career-" + slug(c.title));
+                    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "center" });
+                  }}
+                >
+                  <span className="sp-compare-name">
+                    {c.title}
+                    {on ? <em className="sp-compare-yours">your path</em> : null}
+                  </span>
+                  <span className="sp-compare-track">
+                    <span className="sp-compare-fill" style={{ width: Math.min(100, Math.max(0, Number(c.fit) || 0)) + "%" }} />
+                  </span>
+                  <span className="sp-compare-num">{Number(c.fit) || 0}</span>
+                </button>
+              );
+            })}
+          </section>
+
+          {noDegreeCount ? (
+            <div className="sp-filters">
+              <button className={"sp-filter" + (!onlyNoDegree ? " is-on" : "")} onClick={() => setOnlyNoDegree(false)}>
+                All {careers.length} paths
+              </button>
+              <button className={"sp-filter" + (onlyNoDegree ? " is-on" : "")} onClick={() => setOnlyNoDegree(true)}>
+                No 4-year degree needed ({noDegreeCount})
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {visible.map((c, i) => {
         const on = chosen === c.title;
+        const fit = Number(c.fit) || 0;
         return (
-          <article key={i} className={"sp-card sp-fade" + (on ? " is-chosen" : "")} style={{ animationDelay: i * 0.06 + "s" }}>
+          <article
+            key={c.title}
+            id={"career-" + slug(c.title)}
+            className={"sp-card sp-fade" + (on ? " is-chosen" : "")}
+            style={{ animationDelay: i * 0.06 + "s" }}
+          >
             <div className="sp-card-top">
               <div>
-                <span className="sp-rank">Match {String(i + 1).padStart(2, "0")}</span>
+                <span className="sp-rank">{on ? "Your chosen path" : "Match " + String(i + 1).padStart(2, "0")}</span>
                 <h3 className="sp-card-title">{c.title}</h3>
+                <div className="sp-badges">
+                  <span className={"sp-badge sp-badge-" + fitTone(fit)}>{fitLabel(fit)}</span>
+                  {c.route ? <span className="sp-badge sp-badge-route">{ROUTES[c.route] || c.route}</span> : null}
+                </div>
               </div>
               <Dial value={c.fit} />
             </div>
@@ -657,10 +932,15 @@ function MatchTab({ profile, careers, setCareers, chosen, setChosen, roadmap, se
         </section>
       ) : null}
 
+      {careers.length && !visible.length ? (
+        <p className="sp-hint">No path in this set skips the 4-year degree. Show all paths to see the full list.</p>
+      ) : null}
+
       {careers.length ? (
         <div className="sp-actions">
-          <button className="sp-btn" onClick={run} disabled={busy}>Match again</button>
+          <button className="sp-btn" onClick={run} disabled={busy}>{busy ? "Matching…" : "Match again"}</button>
           <button className="sp-btn sp-btn-primary" onClick={goResume}>Build my resume</button>
+          {chosen ? <span className="sp-saved"><Icon name="check" size={13} /> {chosen} shapes your resume and practice</span> : null}
         </div>
       ) : null}
     </div>
@@ -805,8 +1085,10 @@ function ResumeTab({ profile, resume, setResume, built, setBuilt, chosen, save }
             <Field label="Full name"><input className="sp-input" value={resume.fullName} onChange={(e) => set("fullName", e.target.value)} /></Field>
             <Field label="Email"><input className="sp-input" value={resume.email} onChange={(e) => set("email", e.target.value)} placeholder="you@email.com" /></Field>
             <Field label="Phone"><input className="sp-input" value={resume.phone} onChange={(e) => set("phone", e.target.value)} placeholder="09xx xxx xxxx" /></Field>
-            <Field label="City"><input className="sp-input" value={resume.city} onChange={(e) => set("city", e.target.value)} /></Field>
-            <Field label="School"><input className="sp-input" value={resume.school} onChange={(e) => set("school", e.target.value)} /></Field>
+            <Picker label="City" icon="pin" value={resume.city} onChange={(v) => set("city", v)}
+              groups={PH_LOCATIONS} placeholder="Click to see every city and province" />
+            <Picker label="School" icon="school" value={resume.school} onChange={(v) => set("school", v)}
+              groups={schoolsForCity(resume.city)} placeholder="Click to see the list, or type your school" />
             <Field label="Graduating year"><input className="sp-input" value={resume.gradYear} onChange={(e) => set("gradYear", e.target.value)} /></Field>
           </div>
 
@@ -1157,6 +1439,9 @@ function AdviceTab({ profile, chosen, chat, setChat, save }) {
 export default function SmartPath() {
   const [user, setUser] = useState(null);
   const [ready, setReady] = useState(false);
+  /* Theme is a device preference, not a per-account one, so it lives outside
+     the signed-in data and survives sign-out. */
+  const [theme, setTheme] = useState("light");
   const [tab, setTab] = useState("home");
   const [profile, setProfile] = useState(blankProfile);
   const [careers, setCareers] = useState([]);
@@ -1170,12 +1455,22 @@ export default function SmartPath() {
 
   useEffect(() => {
     (async () => {
+      const saved = await store.get("theme");
+      if (saved === "dark" || saved === "light") setTheme(saved);
+      else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) setTheme("dark");
+
       const s = await store.get("session");
       if (s && s.username) await loadUser(s.username);
       setReady(true);
     })();
     /* eslint-disable-next-line */
   }, []);
+
+  async function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    await store.set("theme", next);
+  }
 
   async function loadUser(u) {
     const d = (await store.get("data:" + u)) || {};
@@ -1218,13 +1513,13 @@ export default function SmartPath() {
   };
 
   if (!ready)
-    return (<div className="sp-root"><Styles /><div className="sp-boot"><span className="sp-pulse" /> Loading SmartPath…</div></div>);
+    return (<div className="sp-root" data-theme={theme}><Styles /><div className="sp-boot"><span className="sp-pulse" /> Loading SmartPath…</div></div>);
 
   if (!user)
-    return (<div className="sp-root"><Styles /><AuthScreen onSignedIn={loadUser} /></div>);
+    return (<div className="sp-root" data-theme={theme}><Styles /><AuthScreen onSignedIn={loadUser} /></div>);
 
   return (
-    <div className="sp-root sp-app">
+    <div className="sp-root sp-app" data-theme={theme}>
       <Styles />
       <Rail tab={tab} setTab={setTab} done={done} user={user} onSignOut={signOut} />
 
@@ -1236,7 +1531,8 @@ export default function SmartPath() {
       <main className="sp-main" key={tab}>
         {tab === "home" ? (
           <OverviewTab profile={profile} careers={careers} chosen={chosen} built={built}
-            prep={prep} practiced={Object.keys(scores).length} done={done} setTab={setTab} />
+            prep={prep} practiced={Object.keys(scores).length} done={done} setTab={setTab}
+            theme={theme} onToggleTheme={toggleTheme} />
         ) : null}
         {tab === "profile" ? (
           <ProfileTab profile={profile} setProfile={setProfile} onSaved={() => save({ profile })}
@@ -1279,15 +1575,36 @@ function Styles() {
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap');
 
 .sp-root{
+  /* text + page */
   --ink:#12233C; --ink-2:#1B3358; --ink-soft:#4A5C77; --paper:#E9EDF2; --card:#FFFFFF;
   --signal:#F2B134; --route:#0F7B6C; --coral:#D8523E; --line:#CBD5E0;
+  /* the navy panel stays dark in both themes: rail, hero, primary buttons */
+  --panel:#12233C; --panel-2:#1B3358; --panel-dot:#16294A; --on-panel:#FFFFFF;
+  /* surfaces that used to be hard-coded */
+  --track:#DDE4EB; --chip:#EEF2F6; --btn-hover:#F4F6F9; --btn-line:#12233C;
+  --dots:rgba(18,35,60,.055);
+  --warm-bg:#FDF3DE; --warm-line:#EBD5A3; --warm-ink:#6A4E12;
+  --err-bg:#FBE9E5; --err-line:#EEBBB0; --err-ink:#8A2B19;
   --display:'Archivo',system-ui,sans-serif;
   --body:'Inter',system-ui,-apple-system,sans-serif;
   --mono:'IBM Plex Mono',ui-monospace,monospace;
   background:var(--paper);
-  background-image:radial-gradient(circle at 1px 1px, rgba(18,35,60,.055) 1px, transparent 0);
+  background-image:radial-gradient(circle at 1px 1px, var(--dots) 1px, transparent 0);
   background-size:22px 22px;
   color:var(--ink); font-family:var(--body); min-height:100vh; -webkit-font-smoothing:antialiased;
+  transition:background-color .18s ease,color .18s ease;
+}
+
+/* dark mode — only the tokens change, no layout rules are duplicated */
+.sp-root[data-theme="dark"]{
+  --ink:#E6EDF6; --ink-2:#C7D5E6; --ink-soft:#9DB0C9; --paper:#0C1421; --card:#151F31;
+  --route:#43C2A6; --line:#2A3852;
+  --panel:#172A46; --panel-2:#20375B; --panel-dot:#2E4571; --on-panel:#FFFFFF;
+  --track:#25344B; --chip:#1D2A40; --btn-hover:#1E2B41; --btn-line:#3A4C6D;
+  --dots:rgba(255,255,255,.05);
+  --warm-bg:#2E2413; --warm-line:#5A4720; --warm-ink:#F3D79A;
+  --err-bg:#33191A; --err-line:#6B3129; --err-ink:#F6B7A9;
+  color-scheme:dark;
 }
 .sp-root *{box-sizing:border-box}
 .sp-root button{font-family:inherit}
@@ -1317,7 +1634,7 @@ function Styles() {
 
 /* auth */
 .sp-auth{display:flex;min-height:100vh}
-.sp-auth-art{position:relative;flex:0 0 32%;background:var(--ink);overflow:hidden;display:none}
+.sp-auth-art{position:relative;flex:0 0 32%;background:var(--panel);overflow:hidden;display:none}
 .sp-auth-svg{width:100%;height:100%}
 .sp-auth-path{stroke-dasharray:900;animation:sp-draw 1.6s ease .1s both}
 .sp-auth-node{animation:sp-pop .5s cubic-bezier(.2,1.4,.4,1) both}
@@ -1337,19 +1654,19 @@ function Styles() {
 .sp-textarea{resize:vertical;line-height:1.5}
 .sp-grid{display:grid;grid-template-columns:1fr;gap:0 16px}
 @media(min-width:640px){.sp-grid{grid-template-columns:1fr 1fr}}
-.sp-meter{height:5px;background:#DDE4EB;border-radius:99px;margin:14px 0 5px;overflow:hidden;max-width:280px}
+.sp-meter{height:5px;background:var(--track);border-radius:99px;margin:14px 0 5px;overflow:hidden;max-width:280px}
 .sp-meter span{display:block;height:100%;background:var(--signal);border-radius:99px;transition:width .3s}
 
 /* buttons */
 .sp-btn{display:inline-flex;align-items:center;gap:6px;background:var(--card);color:var(--ink);
-  border:1.5px solid var(--ink);border-radius:3px;padding:11px 18px;font-size:14px;font-weight:600;
+  border:1.5px solid var(--btn-line);border-radius:3px;padding:11px 18px;font-size:14px;font-weight:600;
   cursor:pointer;transition:transform .1s,background .12s}
-.sp-btn:hover{background:#F4F6F9}
+.sp-btn:hover{background:var(--btn-hover)}
 .sp-btn:active{transform:translateY(1px)}
 .sp-btn:disabled{opacity:.4;cursor:not-allowed}
-.sp-btn-primary{background:var(--ink);color:#fff}
-.sp-btn-primary:hover{background:var(--ink-2)}
-.sp-btn-signal{background:var(--signal);border-color:var(--signal);color:var(--ink)}
+.sp-btn-primary{background:var(--panel);color:var(--on-panel)}
+.sp-btn-primary:hover{background:var(--panel-2)}
+.sp-btn-signal{background:var(--signal);border-color:var(--signal);color:#12233C}
 .sp-btn-signal:hover{background:#FFC356}
 .sp-btn-wide{width:100%;justify-content:center}
 .sp-btn-small{padding:7px 12px;font-size:13px}
@@ -1361,12 +1678,12 @@ function Styles() {
 .sp-rail{display:none}
 .sp-main{max-width:780px;margin:0 auto;padding:18px 16px 40px}
 .sp-mobilebar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;
-  background:var(--ink);color:#fff;position:sticky;top:0;z-index:20}
+  background:var(--panel);color:var(--on-panel);position:sticky;top:0;z-index:20}
 .sp-mobilebar .sp-link{color:var(--signal)}
 @media(min-width:900px){
   .sp-app{display:grid;grid-template-columns:278px 1fr;padding-bottom:0}
-  .sp-rail{display:flex;flex-direction:column;justify-content:space-between;background:var(--ink);
-    color:#fff;padding:30px 24px;min-height:100vh;position:sticky;top:0}
+  .sp-rail{display:flex;flex-direction:column;justify-content:space-between;background:var(--panel);
+    color:var(--on-panel);padding:30px 24px;min-height:100vh;position:sticky;top:0}
   .sp-mobilebar,.sp-tabbar{display:none}
   .sp-main{padding:44px 44px 80px;margin:0;max-width:860px}
 }
@@ -1380,7 +1697,7 @@ function Styles() {
 .sp-stations:before{content:"";position:absolute;left:7px;top:14px;bottom:14px;width:2px;background:#2C4468}
 .sp-station{position:relative;display:flex;align-items:center;gap:11px;width:100%;background:none;border:none;
   padding:10px 0;cursor:pointer;color:#9FB0C6;text-align:left}
-.sp-dot{width:16px;height:16px;border-radius:50%;background:var(--ink);border:2px solid #46618A;flex:0 0 auto;
+.sp-dot{width:16px;height:16px;border-radius:50%;background:var(--panel);border:2px solid #46618A;flex:0 0 auto;
   z-index:1;display:flex;align-items:center;justify-content:center;color:#fff;transition:all .15s}
 .sp-station.is-done .sp-dot{background:var(--route);border-color:var(--route)}
 .sp-station.is-active{color:#fff}
@@ -1400,7 +1717,7 @@ function Styles() {
 .sp-tabbtn.is-on svg{color:var(--route)}
 
 /* hero */
-.sp-hero{background:var(--ink);color:#fff;border-radius:6px;padding:26px 22px;margin-bottom:18px;
+.sp-hero{background:var(--panel);color:var(--on-panel);border-radius:6px;padding:26px 22px;margin-bottom:18px;
   display:grid;gap:16px;position:relative;overflow:hidden}
 .sp-hero:after{content:"";position:absolute;right:-40px;top:-40px;width:150px;height:150px;border-radius:50%;
   background:radial-gradient(circle,rgba(242,177,52,.18),transparent 70%)}
@@ -1433,8 +1750,8 @@ function Styles() {
 .sp-tile-value{font-size:14px;font-weight:600;line-height:1.35}
 .sp-tile-cta{font-size:12px;color:var(--route);font-weight:600;margin-top:3px}
 
-.sp-quote{display:flex;gap:11px;align-items:flex-start;background:#FDF3DE;border:1px solid #EBD5A3;
-  border-radius:5px;padding:14px 16px;color:#6A4E12}
+.sp-quote{display:flex;gap:11px;align-items:flex-start;background:var(--warm-bg);border:1px solid var(--warm-line);
+  border-radius:5px;padding:14px 16px;color:var(--warm-ink)}
 .sp-quote p{margin:0;font-size:13.5px;line-height:1.55}
 .sp-quote svg{flex:0 0 auto;margin-top:1px}
 
@@ -1450,8 +1767,8 @@ function Styles() {
 .sp-chipsets{display:grid;gap:11px}
 .sp-chip-label{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-soft);display:block;margin-bottom:6px}
 .sp-chips{display:flex;flex-wrap:wrap;gap:6px}
-.sp-chip{font-size:12.5px;padding:4px 9px;background:#EEF2F6;border:1px solid var(--line);border-radius:99px}
-.sp-chip-alt{background:#FDF3DE;border-color:#EBD5A3}
+.sp-chip{font-size:12.5px;padding:4px 9px;background:var(--chip);border:1px solid var(--line);border-radius:99px}
+.sp-chip-alt{background:var(--warm-bg);border-color:var(--warm-line);color:var(--warm-ink)}
 .sp-reality{font-size:13px;line-height:1.55;color:var(--ink-soft);margin:13px 0 0;padding-left:11px;border-left:3px solid var(--signal)}
 
 /* roadmap timeline */
@@ -1471,8 +1788,8 @@ function Styles() {
 
 /* notices */
 .sp-notice{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13.5px;padding:11px 13px;
-  border-radius:3px;background:#FDF3DE;border:1px solid #EBD5A3;margin:12px 0}
-.sp-notice-error{background:#FBE9E5;border-color:#EEBBB0;color:#8A2B19}
+  border-radius:3px;background:var(--warm-bg);border:1px solid var(--warm-line);color:var(--warm-ink);margin:12px 0}
+.sp-notice-error{background:var(--err-bg);border-color:var(--err-line);color:var(--err-ink)}
 .sp-loading{display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--ink-soft);padding:16px 0}
 .sp-empty{background:var(--card);border:1.5px dashed var(--line);border-radius:5px;padding:26px 20px;text-align:center}
 .sp-empty-art{color:var(--line);display:flex;justify-content:center;margin-bottom:6px}
@@ -1483,7 +1800,7 @@ function Styles() {
 .sp-segment{display:flex;gap:6px;margin-bottom:20px}
 .sp-seg{flex:1;background:var(--card);border:1.5px solid var(--line);border-radius:3px;padding:10px 8px;
   font-size:13px;font-weight:600;color:var(--ink-soft);cursor:pointer}
-.sp-seg.is-on{background:var(--ink);border-color:var(--ink);color:#fff}
+.sp-seg.is-on{background:var(--panel);border-color:var(--panel);color:var(--on-panel)}
 .sp-seg:disabled{opacity:.45;cursor:not-allowed}
 .sp-designbar{display:grid;gap:18px;background:var(--card);border:1.5px solid var(--line);
   border-radius:5px;padding:16px;margin-bottom:18px}
@@ -1492,18 +1809,18 @@ function Styles() {
 .sp-template.is-on{border-color:var(--route);box-shadow:0 0 0 2px rgba(15,123,108,.14)}
 .sp-template strong{display:block;font-size:13px;margin-top:7px}
 .sp-template em{display:block;font-style:normal;font-size:10.5px;color:var(--ink-soft);line-height:1.35;margin-top:2px}
-.sp-thumb{display:block;height:42px;background:#F2F5F8;border:1px solid var(--line);padding:5px;position:relative}
-.sp-thumb i{display:block;background:#C3CEDA;height:3px;margin-bottom:4px;border-radius:1px}
-.sp-thumb i:first-child{background:var(--ink);height:5px;width:60%}
+.sp-thumb{display:block;height:42px;background:var(--chip);border:1px solid var(--line);padding:5px;position:relative}
+.sp-thumb i{display:block;background:var(--track);height:3px;margin-bottom:4px;border-radius:1px}
+.sp-thumb i:first-child{background:var(--panel);height:5px;width:60%}
 .sp-thumb-signal i:first-child{background:var(--route);height:11px;width:100%;margin:-5px -5px 5px;padding:0;width:calc(100% + 10px)}
 .sp-thumb-compact i{height:2px;margin-bottom:2.5px}
 .sp-swatches{display:flex;gap:8px}
 .sp-swatch{width:30px;height:30px;border-radius:50%;border:2px solid transparent;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
-.sp-swatch.is-on{border-color:var(--ink);box-shadow:0 0 0 2px #fff inset}
+.sp-swatch.is-on{border-color:var(--route);box-shadow:0 0 0 2px var(--card) inset}
 .sp-preview-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px}
 .sp-preview-actions{display:flex;gap:8px;flex-wrap:wrap}
 
-.sp-paper{background:#fff;border:1.5px solid var(--line);padding:26px 22px;line-height:1.55;font-family:Georgia,serif;overflow:hidden}
+.sp-paper{background:#fff;color:#111;border:1.5px solid var(--line);padding:26px 22px;line-height:1.55;font-family:Georgia,serif;overflow:hidden}
 .sp-paper-signal,.sp-paper-compact{font-family:'Helvetica Neue',Arial,sans-serif}
 .sp-paper-compact{font-size:13.5px;line-height:1.4;padding:20px 18px}
 .sp-r-band{margin:-26px -22px 20px;padding:22px;color:#fff}
@@ -1532,17 +1849,80 @@ function Styles() {
 .sp-q-caret{font-size:19px;color:var(--ink-soft);line-height:1}
 .sp-q-body{margin-top:14px}
 .sp-timerrow{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:12px 0}
-.sp-timer{font-family:var(--mono);font-size:19px;padding:3px 10px;background:#EEF2F6;border-radius:3px;border:1.5px solid var(--line)}
+.sp-timer{font-family:var(--mono);font-size:19px;padding:3px 10px;background:var(--chip);border-radius:3px;border:1.5px solid var(--line)}
 .sp-timer.is-live{border-color:var(--route);color:var(--route)}
-.sp-feedback{background:#EEF2F6;border-left:3px solid var(--route);padding:13px 15px;font-size:14px;line-height:1.6;border-radius:2px;margin-top:12px}
+.sp-feedback{background:var(--chip);border-left:3px solid var(--route);padding:13px 15px;font-size:14px;line-height:1.6;border-radius:2px;margin-top:12px}
 .sp-feedback p{margin:0 0 7px}
 .sp-fb-head{display:flex;align-items:center;gap:8px;margin-bottom:9px;font-family:var(--mono);font-size:13px}
-.sp-fb-better{background:#fff;padding:9px 11px;border-radius:3px;margin-top:9px}
+.sp-fb-better{background:var(--card);padding:9px 11px;border-radius:3px;margin-top:9px}
+
+/* theme toggle (homepage hero) */
+.sp-theme{position:absolute;top:14px;right:14px;z-index:2;display:inline-flex;align-items:center;gap:6px;
+  background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.28);color:var(--on-panel);
+  border-radius:99px;padding:6px 13px;font-size:12px;font-weight:600;cursor:pointer;
+  transition:background .14s,border-color .14s}
+.sp-theme:hover{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
+.sp-theme svg{color:var(--signal)}
+@media(min-width:700px){.sp-theme{top:18px;right:18px}}
+
+/* picker (city / school combobox) */
+.sp-picker{position:relative}
+.sp-picker-box{position:relative;display:flex;align-items:center}
+.sp-picker-icon{position:absolute;left:11px;display:flex;color:var(--ink-soft);pointer-events:none}
+.sp-input-iconed{padding-left:34px}
+.sp-picker-box .sp-input{padding-right:38px}
+.sp-picker-caret{position:absolute;right:4px;display:flex;align-items:center;justify-content:center;
+  width:30px;height:30px;background:none;border:none;color:var(--ink-soft);cursor:pointer;
+  transition:transform .15s}
+.sp-picker-caret.is-open{transform:rotate(180deg);color:var(--route)}
+.sp-picker-list{position:absolute;top:100%;left:0;right:0;z-index:40;margin-top:4px;max-height:270px;
+  overflow-y:auto;background:var(--card);border:1.5px solid var(--route);border-radius:4px;
+  box-shadow:0 12px 28px rgba(6,16,32,.18);scroll-margin-bottom:90px}
+.sp-picker-group{padding-bottom:4px}
+.sp-picker-grouphead{position:sticky;top:0;display:block;background:var(--chip);color:var(--ink-soft);
+  font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  padding:6px 12px;border-bottom:1px solid var(--line)}
+.sp-picker-opt{display:block;width:100%;text-align:left;background:none;border:none;cursor:pointer;
+  padding:9px 12px;font-size:14px;color:var(--ink);font-family:inherit;line-height:1.35}
+.sp-picker-opt.is-active{background:var(--chip)}
+.sp-picker-opt.is-chosen{color:var(--route);font-weight:600}
+.sp-picker-none{margin:0;padding:14px 13px;font-size:13px;line-height:1.5;color:var(--ink-soft)}
+
+/* career match: compare strip, filters, badges */
+.sp-compare{background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:15px 16px;margin-bottom:14px}
+.sp-compare-row{display:grid;grid-template-columns:1fr;gap:5px;width:100%;background:none;border:none;
+  padding:8px 0 6px;cursor:pointer;text-align:left;border-bottom:1px solid var(--line)}
+.sp-compare-row:last-child{border-bottom:none;padding-bottom:0}
+.sp-compare-name{font-size:14px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sp-compare-yours{font-style:normal;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--route);border:1px solid var(--route);border-radius:99px;padding:1px 7px}
+.sp-compare-track{height:7px;background:var(--track);border-radius:99px;overflow:hidden;grid-column:1}
+.sp-compare-fill{display:block;height:100%;background:var(--route);border-radius:99px;transition:width .5s ease}
+.sp-compare-num{font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
+@media(min-width:560px){
+  .sp-compare-row{grid-template-columns:minmax(120px,1fr) 2fr auto;align-items:center;gap:12px}
+  .sp-compare-track{grid-column:auto}
+}
+.sp-compare-row:hover .sp-compare-name{color:var(--route)}
+
+.sp-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.sp-filter{background:var(--card);border:1.5px solid var(--line);border-radius:99px;padding:7px 14px;
+  font-size:12.5px;font-weight:600;color:var(--ink-soft);cursor:pointer;font-family:inherit}
+.sp-filter:hover{border-color:var(--route)}
+.sp-filter.is-on{background:var(--panel);border-color:var(--panel);color:var(--on-panel)}
+
+.sp-badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.sp-badge{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+  padding:3px 9px;border-radius:99px;border:1px solid var(--line);color:var(--ink-soft)}
+.sp-badge-strong{background:var(--route);border-color:var(--route);color:#fff}
+.sp-badge-good{border-color:var(--route);color:var(--route)}
+.sp-badge-open{border-color:var(--line);color:var(--ink-soft)}
+.sp-badge-route{background:var(--warm-bg);border-color:var(--warm-line);color:var(--warm-ink)}
 
 /* chat */
 .sp-chat{display:flex;flex-direction:column;gap:10px;min-height:180px;margin-bottom:14px}
 .sp-msg{max-width:88%;padding:11px 14px;font-size:14.5px;line-height:1.55;border-radius:5px;white-space:pre-wrap;animation:sp-fade .25s ease both}
-.sp-msg-you{align-self:flex-end;background:var(--ink);color:#fff;border-bottom-right-radius:1px}
+.sp-msg-you{align-self:flex-end;background:var(--panel);color:var(--on-panel);border-bottom-right-radius:1px}
 .sp-msg-ai{align-self:flex-start;background:var(--card);border:1.5px solid var(--line);border-bottom-left-radius:1px}
 .sp-msg-wait{color:var(--ink-soft);font-style:italic}
 .sp-starters{display:flex;flex-wrap:wrap;gap:8px}
