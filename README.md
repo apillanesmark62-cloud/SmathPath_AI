@@ -23,9 +23,11 @@ netlify.toml                build, routing and header config for Netlify
 
 ### Dark mode
 
-The toggle sits in the top-right of the homepage hero. The choice is saved per
-device under `smartpath:theme` and survives sign-out; on a first visit the app
-follows the operating system's `prefers-color-scheme`.
+The switch sits in the app header — beside the wordmark at the top of the
+sidebar on desktop, and in the top bar on phones — so it is reachable from
+every tab. The choice is saved per device under `smartpath:theme` and survives
+sign-out; on a first visit the app follows the operating system's
+`prefers-color-scheme`.
 
 Dark mode is driven entirely by CSS custom properties — `data-theme="dark"` on
 the root swaps a block of tokens and no layout rule is duplicated. When adding
@@ -143,6 +145,14 @@ const EFFORT = "low";   // low | medium | high | xhigh | max
 
 `EFFORT` trades speed against depth. `low` keeps the app responsive and is
 plenty for these prompts; raise it if you want more considered answers.
+
+## Layout notes
+
+`.sp-tabbar` (the phone tab bar) must stay declared **before** the
+`@media(min-width:900px)` block that hides it. CSS media queries add no
+specificity, so a later plain `.sp-tabbar{display:flex}` wins on source order
+and the tab bar reappears on desktop, floating over the sidebar and the page
+content. If you add tab-bar rules, add them in that same block.
 
 ## Storage
 

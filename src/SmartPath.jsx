@@ -406,6 +406,23 @@ function RouteMap({ done }) {
   );
 }
 
+/* Icon-only theme switch for the app chrome, so the theme is reachable from
+   every tab and not only the homepage. */
+function ThemeSwitch({ theme, onToggle, className }) {
+  const dark = theme === "dark";
+  return (
+    <button
+      className={"sp-themeswitch" + (className ? " " + className : "")}
+      onClick={onToggle}
+      aria-pressed={dark}
+      aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
+      title={dark ? "Switch to light mode" : "Switch to dark mode"}
+    >
+      <Icon name={dark ? "sun" : "moon"} size={16} />
+    </button>
+  );
+}
+
 /* ---------------- stations ---------------- */
 const STATIONS = [
   { id: "home", name: "Overview", short: "Home", icon: "home" },
@@ -416,12 +433,15 @@ const STATIONS = [
   { id: "advice", name: "Ask SmartPath", short: "Ask", icon: "chat" },
 ];
 
-function Rail({ tab, setTab, done, user, onSignOut }) {
+function Rail({ tab, setTab, done, user, onSignOut, theme, onToggleTheme }) {
   return (
     <aside className="sp-rail">
       <div>
         <div className="sp-route-head">
-          <span className="sp-mark">SmartPath</span>
+          <div className="sp-route-title">
+            <span className="sp-mark">SmartPath</span>
+            <ThemeSwitch theme={theme} onToggle={onToggleTheme} className="sp-themeswitch-onpanel" />
+          </div>
           <span className="sp-sub">Career guidance &amp; resume builder</span>
         </div>
         <ol className="sp-stations">
@@ -529,7 +549,7 @@ function AuthScreen({ onSignedIn }) {
 }
 
 /* ---------------- overview ---------------- */
-function OverviewTab({ profile, careers, chosen, built, prep, practiced, done, setTab, theme, onToggleTheme }) {
+function OverviewTab({ profile, careers, chosen, built, prep, practiced, done, setTab }) {
   const steps = ["profile", "match", "resume", "interview", "advice"];
   const pct = Math.round((steps.filter((s) => done[s]).length / steps.length) * 100);
   const hour = new Date().getHours();
@@ -546,16 +566,6 @@ function OverviewTab({ profile, careers, chosen, built, prep, practiced, done, s
   return (
     <div className="sp-pane">
       <section className="sp-hero">
-        <button
-          className="sp-theme"
-          onClick={onToggleTheme}
-          aria-pressed={theme === "dark"}
-          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-        >
-          <Icon name={theme === "dark" ? "sun" : "moon"} size={15} />
-          <span>{theme === "dark" ? "Light" : "Dark"}</span>
-        </button>
-
         <div className="sp-hero-text">
           <span className="sp-eyebrow sp-eyebrow-light">Your path</span>
           <h2 className="sp-hero-h">
@@ -1367,8 +1377,21 @@ function AdviceTab({ profile, chosen, chat, setChat, save }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
+  const seen = useRef({ len: chat.length, busy });
 
-  useEffect(() => { if (endRef.current) endRef.current.scrollIntoView({ behavior: "smooth" }); }, [chat, busy]);
+  /* Follow the conversation when it actually grows, rather than on every
+     render. Opening this tab used to scroll the page and push the heading out
+     of sight before the student had read it. Comparing against the previous
+     length (instead of guarding on first paint) also keeps the behaviour the
+     same under StrictMode, which runs effects twice in development. */
+  useEffect(() => {
+    const grew = chat.length > seen.current.len;
+    const startedThinking = busy && !seen.current.busy;
+    seen.current = { len: chat.length, busy };
+    if ((grew || startedThinking) && endRef.current) {
+      endRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [chat, busy]);
 
   const starters = [
     "What can I do this school year to prepare?",
@@ -1521,18 +1544,21 @@ export default function SmartPath() {
   return (
     <div className="sp-root sp-app" data-theme={theme}>
       <Styles />
-      <Rail tab={tab} setTab={setTab} done={done} user={user} onSignOut={signOut} />
+      <Rail tab={tab} setTab={setTab} done={done} user={user} onSignOut={signOut}
+        theme={theme} onToggleTheme={toggleTheme} />
 
       <div className="sp-mobilebar">
         <span className="sp-mark sp-mark-small">SmartPath</span>
-        <button className="sp-link" onClick={signOut}>Sign out</button>
+        <div className="sp-mobilebar-actions">
+          <ThemeSwitch theme={theme} onToggle={toggleTheme} className="sp-themeswitch-onpanel" />
+          <button className="sp-link" onClick={signOut}>Sign out</button>
+        </div>
       </div>
 
       <main className="sp-main" key={tab}>
         {tab === "home" ? (
           <OverviewTab profile={profile} careers={careers} chosen={chosen} built={built}
-            prep={prep} practiced={Object.keys(scores).length} done={done} setTab={setTab}
-            theme={theme} onToggleTheme={toggleTheme} />
+            prep={prep} practiced={Object.keys(scores).length} done={done} setTab={setTab} />
         ) : null}
         {tab === "profile" ? (
           <ProfileTab profile={profile} setProfile={setProfile} onSaved={() => save({ profile })}
@@ -1680,6 +1706,14 @@ function Styles() {
 .sp-mobilebar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;
   background:var(--panel);color:var(--on-panel);position:sticky;top:0;z-index:20}
 .sp-mobilebar .sp-link{color:var(--signal)}
+/* tab bar */
+.sp-tabbar{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);
+  border-top:1.5px solid var(--line);z-index:30;padding-bottom:env(safe-area-inset-bottom)}
+.sp-tabbtn{flex:1;background:none;border:none;padding:8px 1px 10px;font-size:10px;font-weight:600;
+  color:var(--ink-soft);cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px}
+.sp-tabbtn.is-on{color:var(--ink)}
+.sp-tabbtn.is-on svg{color:var(--route)}
+
 @media(min-width:900px){
   .sp-app{display:grid;grid-template-columns:278px 1fr;padding-bottom:0}
   .sp-rail{display:flex;flex-direction:column;justify-content:space-between;background:var(--panel);
@@ -1690,6 +1724,7 @@ function Styles() {
 
 /* rail */
 .sp-mark{font-family:var(--display);font-weight:800;font-size:21px;letter-spacing:-.02em;display:block}
+.sp-route-title .sp-mark{margin-bottom:0}
 .sp-mark-small{font-size:16px}
 .sp-sub{font-size:12px;color:#9FB0C6;display:block;margin-top:3px}
 .sp-route-head{margin-bottom:26px}
@@ -1707,14 +1742,6 @@ function Styles() {
 .sp-rail-foot{display:flex;flex-direction:column;gap:6px;padding-top:20px;border-top:1px solid #2C4468}
 .sp-user{font-size:12px;color:#9FB0C6}
 .sp-rail-foot .sp-link{color:var(--signal);align-self:flex-start}
-
-/* tab bar */
-.sp-tabbar{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);
-  border-top:1.5px solid var(--line);z-index:30;padding-bottom:env(safe-area-inset-bottom)}
-.sp-tabbtn{flex:1;background:none;border:none;padding:8px 1px 10px;font-size:10px;font-weight:600;
-  color:var(--ink-soft);cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px}
-.sp-tabbtn.is-on{color:var(--ink)}
-.sp-tabbtn.is-on svg{color:var(--route)}
 
 /* hero */
 .sp-hero{background:var(--panel);color:var(--on-panel);border-radius:6px;padding:26px 22px;margin-bottom:18px;
@@ -1856,14 +1883,14 @@ function Styles() {
 .sp-fb-head{display:flex;align-items:center;gap:8px;margin-bottom:9px;font-family:var(--mono);font-size:13px}
 .sp-fb-better{background:var(--card);padding:9px 11px;border-radius:3px;margin-top:9px}
 
-/* theme toggle (homepage hero) */
-.sp-theme{position:absolute;top:14px;right:14px;z-index:2;display:inline-flex;align-items:center;gap:6px;
-  background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.28);color:var(--on-panel);
-  border-radius:99px;padding:6px 13px;font-size:12px;font-weight:600;cursor:pointer;
-  transition:background .14s,border-color .14s}
-.sp-theme:hover{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.5)}
-.sp-theme svg{color:var(--signal)}
-@media(min-width:700px){.sp-theme{top:18px;right:18px}}
+.sp-themeswitch{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;
+  border-radius:50%;background:none;border:1.5px solid var(--line);color:var(--ink-soft);
+  cursor:pointer;transition:border-color .14s,color .14s,background .14s;flex:0 0 auto}
+.sp-themeswitch:hover{border-color:var(--route);color:var(--route)}
+.sp-themeswitch-onpanel{border-color:rgba(255,255,255,.3);color:var(--signal)}
+.sp-themeswitch-onpanel:hover{border-color:var(--signal);background:rgba(255,255,255,.1);color:var(--signal)}
+.sp-mobilebar-actions{display:flex;align-items:center;gap:12px}
+.sp-route-title{display:flex;align-items:center;justify-content:space-between;gap:10px}
 
 /* picker (city / school combobox) */
 .sp-picker{position:relative}
