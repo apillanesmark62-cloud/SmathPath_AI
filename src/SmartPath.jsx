@@ -816,6 +816,7 @@ function diagText(message, diag) {
       return "  " + name + ": SET";
     };
     out.push(line("AUTOTRAIN_URL"));
+    out.push(line("AUTOTRAIN_API_KEY"));
     out.push(line("AUTOTRAIN_REFRESH_TOKEN"));
     out.push(line("AUTOTRAIN_FIREBASE_API_KEY"));
 

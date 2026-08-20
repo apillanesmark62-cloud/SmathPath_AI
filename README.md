@@ -142,14 +142,18 @@ either way and never reaches the browser.
 
 | Route | Variables | Lasts |
 | --- | --- | --- |
-| **A** — paste a token | `AUTOTRAIN_AUTH` | **one hour** |
+| **A** — supply the credential | `AUTOTRAIN_API_KEY` | as long as the credential does |
 | **B** — mint tokens | `AUTOTRAIN_REFRESH_TOKEN` + `AUTOTRAIN_FIREBASE_API_KEY` | indefinitely |
 
-**Route A** is for checking that everything else works. Copy the
-`Authorization` header value from the Testing Console's Network tab — the
-leading `Bearer ` is stripped if you leave it on. An hour after that token was
-minted the site starts answering 401 again, for everyone. It is not a
-deployment strategy.
+**Route A.** Set `AUTOTRAIN_API_KEY` to the `Authorization` header value from
+the Testing Console's successful request. Pasting the whole thing, `Bearer
+eyJ…`, is fine — the prefix is stripped.
+
+How long that lasts depends on what the header holds. A long value beginning
+`eyJ` is a Firebase ID token, and those expire **one hour** after they are
+issued: the site works, then answers 401 for everyone until the variable is
+replaced. If AutoTrain also issues a non-expiring API key, that is the value
+to use here instead, and Route B is unnecessary.
 
 **Route B** is the one to deploy. A Firebase refresh token does not expire
 unless revoked, so `classify.mjs` exchanges it for a fresh ID token at
@@ -172,8 +176,8 @@ attached, where it came from, and when it expires — an expired one is named as
 such, with how long ago it lapsed. The token itself is never shown.
 
 `AUTOTRAIN_TOKEN_ENDPOINT` overrides Google's token service, which exists so
-the refresh path can be tested against a stand-in. `AUTOTRAIN_API_KEY` is
-accepted as an alias for `AUTOTRAIN_AUTH`.
+the refresh path can be tested against a stand-in. `AUTOTRAIN_AUTH` is
+accepted as an alias for `AUTOTRAIN_API_KEY`.
 
 **When AutoTrain refuses the request.** Nothing is summarised away. The error
 line is AutoTrain's own words — `AutoTrain returned 400: Missing required
@@ -262,13 +266,14 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | Key | Value |
    | --- | --- |
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
-   | `AUTOTRAIN_REFRESH_TOKEN` | from the Testing Console — see below |
-   | `AUTOTRAIN_FIREBASE_API_KEY` | from the Testing Console — see below |
+   | `AUTOTRAIN_API_KEY` | the `Authorization` header value from the Testing Console |
 
-   The classifier's endpoint is compiled into `classify.mjs`, but it needs
-   credentials: those last two are what stop it answering 401. Set
-   `AUTOTRAIN_URL` as well when the model is retrained and the job id changes.
-   See **Strand classifier** above for where to find each value.
+   The classifier's endpoint is compiled into `classify.mjs`, but it needs a
+   credential — `AUTOTRAIN_API_KEY` is what stops it answering 401. If that
+   value is a Firebase ID token it expires hourly; use
+   `AUTOTRAIN_REFRESH_TOKEN` and `AUTOTRAIN_FIREBASE_API_KEY` instead to have
+   the function renew it. Set `AUTOTRAIN_URL` as well when the model is
+   retrained and the job id changes. See **Strand classifier** above.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 

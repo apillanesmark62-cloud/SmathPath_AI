@@ -18,11 +18,13 @@
      project that hosts AutoTrain, and those last exactly one hour, so there
      are two ways to supply one — see the credentials section below.
 
-     AUTOTRAIN_AUTH               a bearer token, used as-is. Simple, and it
-                                  stops working an hour after it was minted.
+     AUTOTRAIN_API_KEY            the credential from the Testing Console's
+                                  Authorization header, sent as a bearer
+                                  token. Simple, and it stops working an hour
+                                  after the token was minted.
+     AUTOTRAIN_AUTH               alias for AUTOTRAIN_API_KEY.
      AUTOTRAIN_REFRESH_TOKEN      \ together these mint a fresh ID token on
      AUTOTRAIN_FIREBASE_API_KEY   / demand and keep working indefinitely.
-     AUTOTRAIN_API_KEY            legacy alias for AUTOTRAIN_AUTH.
    ========================================================== */
 
 /* The prediction endpoint, taken from the Testing Console's own network
@@ -125,9 +127,17 @@ function tokenExpiry(jwt) {
   }
 }
 
+/* The configured credential and which variable held it. Pasting the whole
+   header value, "Bearer eyJ...", is the obvious mistake to make and costs
+   nothing to absorb. */
 function staticToken() {
-  const raw = process.env.AUTOTRAIN_AUTH || process.env.AUTOTRAIN_API_KEY || "";
-  return raw.trim().replace(/^Bearer\s+/i, "");
+  for (const name of ["AUTOTRAIN_API_KEY", "AUTOTRAIN_AUTH"]) {
+    const raw = process.env[name];
+    if (typeof raw === "string" && raw.trim()) {
+      return { token: raw.trim().replace(/^Bearer\s+/i, ""), source: name };
+    }
+  }
+  return { token: "", source: null };
 }
 
 async function refreshedToken() {
@@ -181,7 +191,7 @@ async function authToken() {
   }
 
   const fixed = staticToken();
-  if (fixed) return { token: fixed, source: "AUTOTRAIN_AUTH", refreshError };
+  if (fixed.token) return { token: fixed.token, source: fixed.source, refreshError };
   return { token: null, source: null, refreshError };
 }
 
@@ -305,26 +315,25 @@ function readStatus(status, contentType) {
     return "A 422 means the path is right and the body is not — the field names or their types do not match what the model expects.";
   }
   if (status === 401 || status === 403) {
-    const token = staticToken();
-    const expiresAt = token ? tokenExpiry(token) : null;
+    const fixed = staticToken();
+    const expiresAt = fixed.token ? tokenExpiry(fixed.token) : null;
 
-    if (!token && !process.env.AUTOTRAIN_REFRESH_TOKEN) {
+    if (!fixed.token && !process.env.AUTOTRAIN_REFRESH_TOKEN) {
       return (
         "The endpoint needs the same bearer token the AutoTrain dashboard sends, and this " +
-        "deployment has none. Set AUTOTRAIN_AUTH to the token from the Testing Console's " +
-        "Authorization header — or, because those expire after an hour, set " +
-        "AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY and let the function mint " +
-        "its own. See the README."
+        "deployment has none. In Netlify, under Site configuration -> Environment variables, " +
+        "add AUTOTRAIN_API_KEY with the value of the Authorization header from the Testing " +
+        "Console's successful request, then redeploy."
       );
     }
     if (expiresAt && expiresAt <= Date.now()) {
       const hours = Math.round((Date.now() - expiresAt) / 3600000);
       const ago = hours < 1 ? "less than an hour" : hours === 1 ? "an hour" : hours + " hours";
       return (
-        "AUTOTRAIN_AUTH expired " + ago + " ago. " +
-        "Firebase ID tokens last one hour, so a pasted token cannot keep a deployed site " +
-        "working. Set AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY instead and the " +
-        "function will renew the token itself."
+        fixed.source + " holds a token that expired " + ago + " ago. Firebase ID tokens last " +
+        "one hour, so replacing it buys another hour. To stop doing that, set " +
+        "AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY instead and the function will " +
+        "renew the token itself."
       );
     }
     return (
@@ -386,6 +395,7 @@ function envReport(auth) {
   const url = process.env.AUTOTRAIN_URL;
   const report = {
     AUTOTRAIN_URL: url ? { set: true, value: url } : { set: false, using: DEFAULT_URL },
+    AUTOTRAIN_API_KEY: staticToken().source === "AUTOTRAIN_API_KEY" ? { set: true } : { set: false },
     bearer_token: describeToken(auth && auth.token, auth && auth.source),
     AUTOTRAIN_REFRESH_TOKEN: process.env.AUTOTRAIN_REFRESH_TOKEN ? { set: true } : { set: false },
     AUTOTRAIN_FIREBASE_API_KEY: process.env.AUTOTRAIN_FIREBASE_API_KEY ? { set: true } : { set: false },
