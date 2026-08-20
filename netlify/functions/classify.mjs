@@ -140,18 +140,34 @@ function staticToken() {
   return { token: "", source: null };
 }
 
+/* The Firebase web API key, under either spelling. API_KEY and APIKEY are
+   both natural things to type, and a mismatch here costs a redeploy to find
+   out about, so accept the pair rather than adjudicate between them. */
+const FIREBASE_KEY_NAMES = ["AUTOTRAIN_FIREBASE_API_KEY", "AUTOTRAIN_FIREBASE_APIKEY"];
+
+function firebaseApiKey() {
+  for (const name of FIREBASE_KEY_NAMES) {
+    const v = process.env[name];
+    if (typeof v === "string" && v.trim()) return { key: v.trim(), source: name };
+  }
+  return { key: "", source: null };
+}
+
 async function refreshedToken() {
   const refresh = process.env.AUTOTRAIN_REFRESH_TOKEN;
-  const apiKey = process.env.AUTOTRAIN_FIREBASE_API_KEY;
+  const { key: apiKey } = firebaseApiKey();
 
   /* Half-configured is the likeliest way to set this up wrong, and staying
      quiet about it turns into a 401 that blames something else. Name the
      missing half instead. */
   if (refresh && !apiKey) {
-    throw new Error("AUTOTRAIN_REFRESH_TOKEN is set but AUTOTRAIN_FIREBASE_API_KEY is not — both are needed");
+    throw new Error(
+      "AUTOTRAIN_REFRESH_TOKEN is set but no Firebase API key is — add " +
+        FIREBASE_KEY_NAMES.join(" or ") + " (either spelling works)"
+    );
   }
   if (apiKey && !refresh) {
-    throw new Error("AUTOTRAIN_FIREBASE_API_KEY is set but AUTOTRAIN_REFRESH_TOKEN is not — both are needed");
+    throw new Error("a Firebase API key is set but AUTOTRAIN_REFRESH_TOKEN is not — both are needed");
   }
   if (!refresh) return null;
 
@@ -428,7 +444,10 @@ function envReport(auth) {
     AUTOTRAIN_API_KEY: staticToken().source === "AUTOTRAIN_API_KEY" ? { set: true } : { set: false },
     bearer_token: describeToken(auth && auth.token, auth && auth.source),
     AUTOTRAIN_REFRESH_TOKEN: process.env.AUTOTRAIN_REFRESH_TOKEN ? { set: true } : { set: false },
-    AUTOTRAIN_FIREBASE_API_KEY: process.env.AUTOTRAIN_FIREBASE_API_KEY ? { set: true } : { set: false },
+    AUTOTRAIN_FIREBASE_API_KEY: (() => {
+      const found = firebaseApiKey();
+      return found.key ? { set: true, as: found.source } : { set: false };
+    })(),
     node: typeof process !== "undefined" && process.version ? process.version : "unknown",
   };
 
@@ -507,15 +526,18 @@ export async function handleClassify(body, ip = "local") {
   const baseUrl = process.env.AUTOTRAIN_URL || DEFAULT_URL;
   const headers = { "Content-Type": "application/json", Accept: "application/json" };
 
-  const auth = await authToken();
+  let auth = await authToken();
   if (auth.token) headers.Authorization = "Bearer " + auth.token;
+
+  /* At most one re-authentication per request, shared across the URL attempts
+     so a stale token cannot cost two extra round trips. */
+  let reauthenticated = false;
 
   /* What goes in the trace: identical to what is sent, minus the credential.
      The token is never echoed — only whether there is one, and when it dies. */
   const shownHeaders = { ...headers };
   if (shownHeaders.Authorization) shownHeaders.Authorization = "Bearer <redacted>";
 
-  const env = envReport(auth);
 
   const attempts = attemptsFor(body.answers, baseUrl);
 
@@ -541,9 +563,38 @@ export async function handleClassify(body, ip = "local") {
       "\n  body: " + payload
     );
 
+    const send = () => fetch(url, { method: "POST", headers, body: payload });
+
     let res;
     try {
-      res = await fetch(url, { method: "POST", headers, body: payload });
+      res = await send();
+
+      /* A 401 on a token we believed was live means our idea of its expiry was
+         wrong — it was revoked, rotated, or the clocks disagree. The cached
+         token is the thing at fault, so discard it, mint another and try once
+         more. Only once, and only when refreshing is what issued the token:
+         retrying a static token would just repeat the same 401. */
+      if (
+        res.status === 401 &&
+        !reauthenticated &&
+        auth.source === "AUTOTRAIN_REFRESH_TOKEN"
+      ) {
+        reauthenticated = true;
+        cachedToken = null;
+        console.log("[classify] 401 on a token we thought was live — re-authenticating");
+
+        const retry = await authToken();
+        if (retry.token) {
+          headers.Authorization = "Bearer " + retry.token;
+          auth = retry;
+          step.reauthenticated = true;
+          res = await send();
+        } else if (retry.refreshError) {
+          auth = retry;
+          step.reauthenticated = false;
+          step.reauth_error = retry.refreshError;
+        }
+      }
     } catch (e) {
       const message = e && e.message ? e.message : String(e);
       step.outcome = "network-error";
@@ -556,7 +607,7 @@ export async function handleClassify(body, ip = "local") {
           detail: message,
           upstream_status: null,
           trace,
-          env,
+          env: envReport(auth),
         },
       };
     }
@@ -631,10 +682,10 @@ export async function handleClassify(body, ip = "local") {
     const hint = readStatus(res.status, contentType, auth);
 
     if (res.status === 401 || res.status === 403) {
-      return { status: 502, body: { error: headline, upstream_status: res.status, detail, hint, trace, env } };
+      return { status: 502, body: { error: headline, upstream_status: res.status, detail, hint, trace, env: envReport(auth) } };
     }
     if (res.status === 429) {
-      return { status: 429, body: { error: headline, upstream_status: res.status, detail, hint, trace, env } };
+      return { status: 429, body: { error: headline, upstream_status: res.status, detail, hint, trace, env: envReport(auth) } };
     }
 
     firstFailure = firstFailure || {
@@ -650,7 +701,7 @@ export async function handleClassify(body, ip = "local") {
   /* Both URLs were refused. The first refusal is the honest one to report —
      the second only differs by a trailing slash. */
   firstFailure.body.trace = trace;
-  firstFailure.body.env = env;
+  firstFailure.body.env = envReport(auth);
   return firstFailure;
 }
 

@@ -159,7 +159,12 @@ to use here instead, and Route B is unnecessary.
 unless revoked, so `classify.mjs` exchanges it for a fresh ID token at
 `securetoken.googleapis.com` whenever the cached one is within five minutes of
 running out, and caches the result for the life of the instance — many
-predictions, one exchange. Find the two values in the Testing Console with
+predictions, one exchange.
+
+If AutoTrain rejects a token the function believed was still live — revoked,
+rotated, or the clocks disagree — it discards the cached token, mints another
+and retries the request once. Only once, and only for a token that came from
+refreshing: retrying a pasted one would repeat the same 401. Find the two values in the Testing Console with
 DevTools open:
 
 - `AUTOTRAIN_REFRESH_TOKEN` — Application → IndexedDB → `firebaseLocalStorage`
@@ -168,9 +173,10 @@ DevTools open:
   `?key=` parameter on any request to `identitytoolkit.googleapis.com` or
   `securetoken.googleapis.com`
 
-Note the spelling: `AUTOTRAIN_FIREBASE_API_KEY`, with an underscore between
-`API` and `KEY`. `AUTOTRAIN_FIREBASE_APIKEY` is a different variable and the
-function will not see it.
+Either spelling of the key works — `AUTOTRAIN_FIREBASE_API_KEY` or
+`AUTOTRAIN_FIREBASE_APIKEY`. Both are natural to type and a mismatch costs a
+redeploy to discover, so the function accepts the pair and the diagnostics say
+which one it found.
 
 **Both or neither.** Setting one without the other used to fail silently and
 surface as a 401 that blamed something else; it now says which half is
