@@ -131,11 +131,49 @@ expect to have to change: copy the fresh Request URL from the console and set
 `AUTOTRAIN_URL`.
 
 `?access=dashboard` is carried through verbatim because the console sends it.
-It is a mode flag rather than a credential, but it is also the part most
-likely to tie the request to a signed-in dashboard session — so if the
-deployed function ever gets a 401 or 403 while the console still works, start
-by diffing the request headers. `AUTOTRAIN_API_KEY`, if it comes to that, is
-sent as `Authorization: Bearer <key>` from the server side only.
+
+**The endpoint requires authentication.** Without a bearer token it answers
+`401 Dashboard authentication is required.` The console sends a **Firebase ID
+token** for the project that hosts AutoTrain — and those last exactly one
+hour, which shapes everything below.
+
+There are two ways to supply one. The token is read in the serverless function
+either way and never reaches the browser.
+
+| Route | Variables | Lasts |
+| --- | --- | --- |
+| **A** — paste a token | `AUTOTRAIN_AUTH` | **one hour** |
+| **B** — mint tokens | `AUTOTRAIN_REFRESH_TOKEN` + `AUTOTRAIN_FIREBASE_API_KEY` | indefinitely |
+
+**Route A** is for checking that everything else works. Copy the
+`Authorization` header value from the Testing Console's Network tab — the
+leading `Bearer ` is stripped if you leave it on. An hour after that token was
+minted the site starts answering 401 again, for everyone. It is not a
+deployment strategy.
+
+**Route B** is the one to deploy. A Firebase refresh token does not expire
+unless revoked, so `classify.mjs` exchanges it for a fresh ID token at
+`securetoken.googleapis.com` whenever the cached one is within five minutes of
+running out, and caches the result for the life of the instance — many
+predictions, one exchange. Find the two values in the Testing Console with
+DevTools open:
+
+- `AUTOTRAIN_REFRESH_TOKEN` — Application → IndexedDB → `firebaseLocalStorage`
+  → your user record → `stsTokenManager` → `refreshToken`
+- `AUTOTRAIN_FIREBASE_API_KEY` — the project's web API key, visible as the
+  `?key=` parameter on any request to `identitytoolkit.googleapis.com` or
+  `securetoken.googleapis.com`
+
+Both are secrets: they authenticate as your AutoTrain account. They belong in
+Netlify's environment, never in the repository.
+
+If a 401 comes back anyway, the diagnostics panel says whether a token was
+attached, where it came from, and when it expires — an expired one is named as
+such, with how long ago it lapsed. The token itself is never shown.
+
+`AUTOTRAIN_TOKEN_ENDPOINT` overrides Google's token service, which exists so
+the refresh path can be tested against a stand-in. `AUTOTRAIN_API_KEY` is
+accepted as an alias for `AUTOTRAIN_AUTH`.
 
 **When AutoTrain refuses the request.** Nothing is summarised away. The error
 line is AutoTrain's own words — `AutoTrain returned 400: Missing required
@@ -224,12 +262,13 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | Key | Value |
    | --- | --- |
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
+   | `AUTOTRAIN_REFRESH_TOKEN` | from the Testing Console — see below |
+   | `AUTOTRAIN_FIREBASE_API_KEY` | from the Testing Console — see below |
 
-
-   The classifier needs nothing — its endpoint is compiled into
-   `classify.mjs`. Set `AUTOTRAIN_URL` when the model is retrained and the job
-   id changes, and `AUTOTRAIN_API_KEY` only if the endpoint starts asking for
-   one. See **Strand classifier** above.
+   The classifier's endpoint is compiled into `classify.mjs`, but it needs
+   credentials: those last two are what stop it answering 401. Set
+   `AUTOTRAIN_URL` as well when the model is retrained and the job id changes.
+   See **Strand classifier** above for where to find each value.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 

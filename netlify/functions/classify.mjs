@@ -13,10 +13,16 @@
      AUTOTRAIN_URL      optional — overrides DEFAULT_URL below. Set it when the
                         job id changes, i.e. when the model is retrained and
                         AutoTrain issues a new one.
-     AUTOTRAIN_API_KEY  optional — sent as "Authorization: Bearer <key>" when
-                        set. The Testing Console's request carries no auth
-                        header, so this stays unset unless the endpoint starts
-                        asking for one.
+     The endpoint answers "401 Dashboard authentication is required" without a
+     bearer token. The Testing Console sends a Firebase ID token for the
+     project that hosts AutoTrain, and those last exactly one hour, so there
+     are two ways to supply one — see the credentials section below.
+
+     AUTOTRAIN_AUTH               a bearer token, used as-is. Simple, and it
+                                  stops working an hour after it was minted.
+     AUTOTRAIN_REFRESH_TOKEN      \ together these mint a fresh ID token on
+     AUTOTRAIN_FIREBASE_API_KEY   / demand and keep working indefinitely.
+     AUTOTRAIN_API_KEY            legacy alias for AUTOTRAIN_AUTH.
    ========================================================== */
 
 /* The prediction endpoint, taken from the Testing Console's own network
@@ -72,6 +78,128 @@ export const ACTIVITIES = [
   "drawing_or_designing",
   "building_or_repairing",
 ];
+
+/* ==========================================================
+   Credentials
+
+   The prediction endpoint requires the same bearer token the AutoTrain
+   dashboard sends: a Firebase ID token, issued by Google's secure token
+   service for the project that hosts AutoTrain.
+
+   Those tokens live for one hour. A token pasted into an environment
+   variable therefore fixes the site until it expires and then breaks it for
+   everyone, which is why the refresh path exists: a Firebase refresh token
+   does not expire unless it is revoked, and exchanging one for a fresh ID
+   token is a documented, unauthenticated-by-design call that needs only the
+   project's public web API key.
+
+   Whichever route supplies the token, it is read here, in the serverless
+   function, and never sent to the browser.
+   ========================================================== */
+
+/* Google's secure token service. Overridable by AUTOTRAIN_TOKEN_ENDPOINT so
+   the refresh path can be exercised against a stand-in without reaching out
+   to Google, and so a move on Google's side is a config change. */
+const REFRESH_ENDPOINT = "https://securetoken.googleapis.com/v1/token";
+
+function tokenEndpoint() {
+  return process.env.AUTOTRAIN_TOKEN_ENDPOINT || REFRESH_ENDPOINT;
+}
+
+/* Renew this long before expiry so a request in flight cannot age out. */
+const RENEW_MARGIN_MS = 5 * 60_000;
+
+/* Held for the life of the instance: one exchange serves many predictions. */
+let cachedToken = null;
+
+/* A JWT's expiry, read from its payload without verifying the signature —
+   this is our own token and we only want to know when to replace it. */
+function tokenExpiry(jwt) {
+  try {
+    const part = String(jwt).split(".")[1];
+    if (!part) return null;
+    const claims = JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
+    return typeof claims.exp === "number" ? claims.exp * 1000 : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function staticToken() {
+  const raw = process.env.AUTOTRAIN_AUTH || process.env.AUTOTRAIN_API_KEY || "";
+  return raw.trim().replace(/^Bearer\s+/i, "");
+}
+
+async function refreshedToken() {
+  const refresh = process.env.AUTOTRAIN_REFRESH_TOKEN;
+  const apiKey = process.env.AUTOTRAIN_FIREBASE_API_KEY;
+  if (!refresh || !apiKey) return null;
+
+  if (cachedToken && cachedToken.expiresAt - Date.now() > RENEW_MARGIN_MS) {
+    return cachedToken.token;
+  }
+
+  const res = await fetch(tokenEndpoint() + "?key=" + encodeURIComponent(apiKey), {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh }).toString(),
+  });
+  const text = await res.text();
+
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    /* reported below */
+  }
+
+  if (!res.ok) {
+    const why = (data && data.error && (data.error.message || data.error)) || text.slice(0, 200);
+    throw new Error("refreshing the AutoTrain token failed (" + res.status + "): " + why);
+  }
+
+  const token = data && (data.id_token || data.access_token);
+  if (!token) throw new Error("the token service returned no id_token");
+
+  const expiresAt =
+    tokenExpiry(token) || Date.now() + Number((data && data.expires_in) || 3600) * 1000;
+  cachedToken = { token, expiresAt };
+  console.log("[classify] minted a fresh ID token, good until " + new Date(expiresAt).toISOString());
+  return token;
+}
+
+/* The token to send, and where it came from. Refreshing wins when it is
+   configured, because a static token is the one that goes stale. */
+async function authToken() {
+  let refreshError = null;
+  try {
+    const fresh = await refreshedToken();
+    if (fresh) return { token: fresh, source: "AUTOTRAIN_REFRESH_TOKEN" };
+  } catch (e) {
+    refreshError = e && e.message ? e.message : String(e);
+    console.error("[classify] " + refreshError);
+  }
+
+  const fixed = staticToken();
+  if (fixed) return { token: fixed, source: "AUTOTRAIN_AUTH", refreshError };
+  return { token: null, source: null, refreshError };
+}
+
+/* Describe a token for the diagnostics block without ever showing it. Its
+   expiry is the useful part: an expired token is the likeliest cause of a
+   401, and saying so beats making someone guess. */
+function describeToken(token, source) {
+  if (!token) return { set: false };
+  const expiresAt = tokenExpiry(token);
+  const out = { set: true, source, length: token.length };
+  if (expiresAt) {
+    out.expires_at = new Date(expiresAt).toISOString();
+    const left = expiresAt - Date.now();
+    out.expired = left <= 0;
+    out.minutes_left = Math.round(left / 60000);
+  }
+  return out;
+}
 
 /* Best-effort rate limit; per serverless instance, not global. */
 const WINDOW_MS = 60_000;
@@ -177,13 +305,33 @@ function readStatus(status, contentType) {
     return "A 422 means the path is right and the body is not — the field names or their types do not match what the model expects.";
   }
   if (status === 401 || status === 403) {
+    const token = staticToken();
+    const expiresAt = token ? tokenExpiry(token) : null;
+
+    if (!token && !process.env.AUTOTRAIN_REFRESH_TOKEN) {
+      return (
+        "The endpoint needs the same bearer token the AutoTrain dashboard sends, and this " +
+        "deployment has none. Set AUTOTRAIN_AUTH to the token from the Testing Console's " +
+        "Authorization header — or, because those expire after an hour, set " +
+        "AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY and let the function mint " +
+        "its own. See the README."
+      );
+    }
+    if (expiresAt && expiresAt <= Date.now()) {
+      const hours = Math.round((Date.now() - expiresAt) / 3600000);
+      const ago = hours < 1 ? "less than an hour" : hours === 1 ? "an hour" : hours + " hours";
+      return (
+        "AUTOTRAIN_AUTH expired " + ago + " ago. " +
+        "Firebase ID tokens last one hour, so a pasted token cannot keep a deployed site " +
+        "working. Set AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY instead and the " +
+        "function will renew the token itself."
+      );
+    }
     return (
-      "The endpoint refused this request but not the Testing Console's. The console runs " +
-      "inside a signed-in dashboard session, so it may be sending a cookie or token that " +
-      "this server-side call is not. Compare the request headers in the console's Network " +
-      "tab with the ones listed below; if there is an Authorization header, put its token " +
-      "in AUTOTRAIN_API_KEY. Do not move the call into the browser to work around it — " +
-      "that would publish " + configured + " to every visitor."
+      "The token was sent and refused. If it was minted for a different Firebase project " +
+      "than the one hosting AutoTrain it will not be accepted — check the request headers " +
+      "in the Testing Console's Network tab against the ones listed below. Do not move the " +
+      "call into the browser to work around it; that would publish the token to every visitor."
     );
   }
   return null;
@@ -234,16 +382,17 @@ function upstreamMessage(text, data, contentType) {
    the model id is an identifier rather than a credential — it comes back in
    AutoTrain's own replies — so it is shown in full, which is the only way to
    confirm the deployment really has the value you think it has. */
-function envReport() {
+function envReport(auth) {
   const url = process.env.AUTOTRAIN_URL;
-  const key = process.env.AUTOTRAIN_API_KEY;
-  return {
-    AUTOTRAIN_URL: url
-      ? { set: true, value: url }
-      : { set: false, using: DEFAULT_URL + " (built-in fallback — known to answer 404)" },
-    AUTOTRAIN_API_KEY: key ? { set: true, length: key.length } : { set: false },
+  const report = {
+    AUTOTRAIN_URL: url ? { set: true, value: url } : { set: false, using: DEFAULT_URL },
+    bearer_token: describeToken(auth && auth.token, auth && auth.source),
+    AUTOTRAIN_REFRESH_TOKEN: process.env.AUTOTRAIN_REFRESH_TOKEN ? { set: true } : { set: false },
+    AUTOTRAIN_FIREBASE_API_KEY: process.env.AUTOTRAIN_FIREBASE_API_KEY ? { set: true } : { set: false },
     node: typeof process !== "undefined" && process.version ? process.version : "unknown",
   };
+  if (auth && auth.refreshError) report.refresh_error = auth.refreshError;
+  return report;
 }
 
 function headersOf(res) {
@@ -294,12 +443,16 @@ export async function handleClassify(body, ip = "local") {
 
   const baseUrl = process.env.AUTOTRAIN_URL || DEFAULT_URL;
   const headers = { "Content-Type": "application/json", Accept: "application/json" };
-  if (process.env.AUTOTRAIN_API_KEY) {
-    headers.Authorization = "Bearer " + process.env.AUTOTRAIN_API_KEY;
-  }
-  /* What goes in the trace: identical to what is sent, minus the credential. */
+
+  const auth = await authToken();
+  if (auth.token) headers.Authorization = "Bearer " + auth.token;
+
+  /* What goes in the trace: identical to what is sent, minus the credential.
+     The token is never echoed — only whether there is one, and when it dies. */
   const shownHeaders = { ...headers };
   if (shownHeaders.Authorization) shownHeaders.Authorization = "Bearer <redacted>";
+
+  const env = envReport(auth);
 
   const attempts = attemptsFor(body.answers, baseUrl);
 
@@ -308,7 +461,6 @@ export async function handleClassify(body, ip = "local") {
      JSON parsing. Failures return this to the caller rather than summarising
      it, so the live error is readable without digging through logs. */
   const trace = [];
-  const env = envReport();
   let firstFailure = null;
 
   for (const attempt of attempts) {

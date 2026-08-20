@@ -813,10 +813,27 @@ function diagText(message, diag) {
       if (!v) return "  " + name + ": unknown";
       if (!v.set) return "  " + name + ": NOT SET" + (v.using ? " — using " + v.using : "");
       if (typeof v.value === "string") return "  " + name + ": SET = " + v.value;
-      return "  " + name + ": SET (" + v.length + " characters, value withheld)";
+      return "  " + name + ": SET";
     };
     out.push(line("AUTOTRAIN_URL"));
-    out.push(line("AUTOTRAIN_API_KEY"));
+    out.push(line("AUTOTRAIN_REFRESH_TOKEN"));
+    out.push(line("AUTOTRAIN_FIREBASE_API_KEY"));
+
+    /* The token itself is never sent here — only whether one was attached and
+       how much life it had left, which is what a 401 turns on. */
+    const t = env.bearer_token;
+    if (t && t.set) {
+      let note = "  bearer token: SENT (from " + (t.source || "configuration") + ")";
+      if (t.expires_at) {
+        note += t.expired
+          ? " — EXPIRED at " + t.expires_at
+          : " — valid for another " + t.minutes_left + " min (until " + t.expires_at + ")";
+      }
+      out.push(note);
+    } else {
+      out.push("  bearer token: NONE SENT");
+    }
+    if (env.refresh_error) out.push("  token refresh failed: " + env.refresh_error);
     if (env.node) out.push("  node: " + env.node);
     out.push("");
   }
