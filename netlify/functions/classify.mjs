@@ -401,6 +401,16 @@ function envReport(auth) {
     AUTOTRAIN_FIREBASE_API_KEY: process.env.AUTOTRAIN_FIREBASE_API_KEY ? { set: true } : { set: false },
     node: typeof process !== "undefined" && process.version ? process.version : "unknown",
   };
+
+  /* Which deploy this is. Netlify scopes environment variables by context, so
+     a variable added to production only is genuinely absent on a deploy
+     preview or a branch deploy — and that looks identical to never having
+     added it unless the context is named. */
+  const context = process.env.CONTEXT;
+  if (context) {
+    report.deploy = { context, branch: process.env.BRANCH || "unknown" };
+  }
+
   if (auth && auth.refreshError) report.refresh_error = auth.refreshError;
   return report;
 }

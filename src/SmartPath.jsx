@@ -834,6 +834,9 @@ function diagText(message, diag) {
     } else {
       out.push("  bearer token: NONE SENT");
     }
+    if (env.deploy) {
+      out.push("  deploy context: " + env.deploy.context + " (branch " + env.deploy.branch + ")");
+    }
     if (env.refresh_error) out.push("  token refresh failed: " + env.refresh_error);
     if (env.node) out.push("  node: " + env.node);
     out.push("");
