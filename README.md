@@ -119,10 +119,28 @@ classifier runs with nothing set. `AUTOTRAIN_URL` overrides the endpoint, and
 `AUTOTRAIN_API_KEY` — if the deployment ever requires one — is sent as
 `Authorization: Bearer <key>` from the server side only.
 
-**When AutoTrain refuses the request.** The UI shows the endpoint's own words
-under the error — `AutoTrain returned 400. model_id is required`, say — and the
-Netlify function log carries the full outgoing body and the verbatim reply.
-Read those first; they say what is wrong far more reliably than guessing.
+**When AutoTrain refuses the request.** Nothing is summarised away. The error
+line is AutoTrain's own words — `AutoTrain returned 400: Missing required
+field: api_key` — and **Show the request and reply** underneath opens the full
+trace: for every attempt, the URL, the request headers, the exact JSON body
+sent, the HTTP status and status text, every response header, and the response
+body as text *before* any JSON parsing, plus a note if it did not parse. Above
+that sits what the deployed function can see of its own configuration, so
+whether `AUTOTRAIN_MODEL_ID` actually reached the environment is a fact on the
+page rather than a guess. **Copy** puts the whole thing on the clipboard.
+
+The same trace goes to the Netlify function log, tagged `[classify] REQUEST`
+and `[classify] RESPONSE`.
+
+`AUTOTRAIN_API_KEY` is the one thing never echoed — the trace reports whether
+it is set and how long it is, and the header shows as `Bearer <redacted>`. The
+model id is not a credential (AutoTrain returns it in its own replies), so it
+is shown in full, which is the only way to confirm the value the deployment
+actually holds.
+
+A reply that is HTML rather than JSON is named as such, with its `<title>` —
+the endpoint sits behind Cloudflare, and an edge block is an HTML page, so
+quoting 300 characters of markup would read as noise.
 
 If the complaint is about a missing model, set `AUTOTRAIN_MODEL_ID` to the
 `model_id` from your Testing Console response. Where that id belongs in the
@@ -221,8 +239,13 @@ To confirm after a build, search `dist/` — there should be no key and no
 `api.anthropic.com`:
 
 ```bash
-npm run build && grep -ri "sk-ant\|api.anthropic.com\|AUTOTRAIN_API_KEY" dist/ ; echo "exit $? (1 = clean)"
+npm run build && grep -ri "sk-ant\|api.anthropic.com\|Bearer " dist/ ; echo "exit $? (1 = clean)"
 ```
+
+The string `AUTOTRAIN_API_KEY` *does* appear in the bundle, and that is correct:
+the diagnostics panel labels the row that reports whether the key is set. It is
+the variable's name, never its value — the value only ever exists in the
+serverless function's environment.
 
 The endpoint also pins the model server-side, validates the request shape, caps
 message count and length, and applies a best-effort per-IP rate limit. That

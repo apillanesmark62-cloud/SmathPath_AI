@@ -146,18 +146,66 @@ const SHAPE_ERRORS = new Set([400, 404, 415, 422]);
    cold start pays for the search. */
 let preferredShape = null;
 
-/* Pull whatever the upstream said out of its reply so the cause is visible
-   instead of being buried in the function log. Truncated, and this endpoint
-   takes no credentials, so there is nothing sensitive to echo. */
-function upstreamMessage(text, data) {
+/* How much of a raw upstream body to keep per attempt. Generous on purpose:
+   the whole point is that nothing is thrown away before it can be read. */
+const RAW_LIMIT = 2000;
+
+/* Say what an upstream reply actually is, in one line.
+
+   AutoTrain sits behind Cloudflare, so a refusal is not necessarily JSON — an
+   edge block or an error page arrives as HTML, and dumping 300 characters of
+   markup reads as gibberish. Name that case instead of quoting it. */
+function upstreamMessage(text, data, contentType) {
   if (data && typeof data === "object") {
     for (const key of ["error", "message", "detail", "details"]) {
       const v = data[key];
       if (typeof v === "string" && v.trim()) return v.trim().slice(0, 300);
       if (v && typeof v === "object") return JSON.stringify(v).slice(0, 300);
     }
+    /* JSON, but none of the usual keys — show the object itself. */
+    return JSON.stringify(data).slice(0, 300);
   }
-  return String(text || "").trim().slice(0, 300);
+
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+
+  if (/^\s*<(!doctype|html)/i.test(raw) || /text\/html/i.test(contentType || "")) {
+    const title = raw.match(/<title[^>]*>([^<]*)<\/title>/i);
+    const heading = raw.match(/<h1[^>]*>([^<]*)<\/h1>/i);
+    const named = (title && title[1]) || (heading && heading[1]) || "";
+    return named.trim()
+      ? "an HTML page, not JSON — \"" + named.trim().slice(0, 120) + "\""
+      : "an HTML page, not JSON (" + raw.length + " characters)";
+  }
+
+  return raw.slice(0, 300);
+}
+
+/* What the function can see of its own configuration, for the diagnostics
+   block. AUTOTRAIN_API_KEY is reported as present-or-absent and never echoed;
+   the model id is an identifier rather than a credential — it comes back in
+   AutoTrain's own replies — so it is shown in full, which is the only way to
+   confirm the deployment really has the value you think it has. */
+function envReport() {
+  const url = process.env.AUTOTRAIN_URL;
+  const key = process.env.AUTOTRAIN_API_KEY;
+  const model = process.env.AUTOTRAIN_MODEL_ID;
+  return {
+    AUTOTRAIN_URL: url ? { set: true, value: url } : { set: false, using: DEFAULT_URL + " (built-in default)" },
+    AUTOTRAIN_API_KEY: key ? { set: true, length: key.length } : { set: false },
+    AUTOTRAIN_MODEL_ID: model ? { set: true, length: model.length, value: model } : { set: false },
+    node: typeof process !== "undefined" && process.version ? process.version : "unknown",
+  };
+}
+
+function headersOf(res) {
+  const out = {};
+  try {
+    for (const [k, v] of res.headers) out[k] = v;
+  } catch (e) {
+    /* a runtime without an iterable Headers — the status still tells us most */
+  }
+  return out;
 }
 
 /* Turn AutoTrain's prediction into { strand, confidence, ranked }.
@@ -197,10 +245,13 @@ export async function handleClassify(body, ip = "local") {
   if (problem) return { status: 400, body: { error: problem } };
 
   const baseUrl = process.env.AUTOTRAIN_URL || DEFAULT_URL;
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", Accept: "application/json" };
   if (process.env.AUTOTRAIN_API_KEY) {
     headers.Authorization = "Bearer " + process.env.AUTOTRAIN_API_KEY;
   }
+  /* What goes in the trace: identical to what is sent, minus the credential. */
+  const shownHeaders = { ...headers };
+  if (shownHeaders.Authorization) shownHeaders.Authorization = "Bearer <redacted>";
 
   let attempts = attemptsFor(body.answers);
   if (preferredShape) {
@@ -208,73 +259,127 @@ export async function handleClassify(body, ip = "local") {
     if (known.length) attempts = known.concat(attempts.filter((a) => a.label !== preferredShape));
   }
 
+  /* Every attempt is recorded in full — request as sent, status, response
+     headers, and the response body as text exactly as it arrived, before any
+     JSON parsing. Failures return this to the caller rather than summarising
+     it, so the live error is readable without digging through logs. */
+  const trace = [];
+  const env = envReport();
   let firstFailure = null;
 
   for (const attempt of attempts) {
     const url = attempt.query ? withModelQuery(baseUrl, attempt.query) : baseUrl;
     const payload = JSON.stringify(attempt.body);
-    console.log("AutoTrain request [" + attempt.label + "] ->", url, payload);
+    const step = {
+      shape: attempt.label,
+      request: { method: "POST", url, headers: shownHeaders, body: payload },
+    };
+    trace.push(step);
+
+    console.log(
+      "[classify] REQUEST shape=" + attempt.label + " POST " + url +
+      "\n  headers: " + JSON.stringify(shownHeaders) +
+      "\n  body: " + payload
+    );
 
     let res;
     try {
       res = await fetch(url, { method: "POST", headers, body: payload });
     } catch (e) {
-      const detail = e && e.message ? e.message : String(e);
-      console.error("AutoTrain request failed:", detail);
+      const message = e && e.message ? e.message : String(e);
+      step.outcome = "network-error";
+      step.error = message;
+      console.error("[classify] NETWORK ERROR shape=" + attempt.label + ": " + message);
       return {
         status: 502,
-        body: { error: "could not reach the classifier", detail: detail.slice(0, 300) },
+        body: {
+          error: "Could not reach AutoTrain: " + message,
+          detail: message,
+          upstream_status: null,
+          trace,
+          env,
+        },
       };
     }
 
+    /* Read as text first, always. Parsing is a second, separate step, so a
+       reply that is not JSON is still reported word for word. */
     const text = await res.text();
+    const contentType = res.headers.get("content-type") || "";
     let data = null;
+    let parseError = null;
     try {
       data = JSON.parse(text);
     } catch (e) {
-      /* handled below — an unparseable body is reported verbatim */
+      parseError = e && e.message ? e.message : String(e);
     }
+
+    step.response = {
+      status: res.status,
+      status_text: res.statusText || "",
+      content_type: contentType,
+      headers: headersOf(res),
+      body_length: text.length,
+      body_truncated: text.length > RAW_LIMIT,
+      body_text: text.slice(0, RAW_LIMIT),
+      json_parsed: parseError === null,
+      parse_error: parseError,
+    };
+
+    console.log(
+      "[classify] RESPONSE shape=" + attempt.label +
+      " status=" + res.status + " " + (res.statusText || "") +
+      " content-type=" + (contentType || "none") +
+      " length=" + text.length +
+      (parseError ? " (not JSON: " + parseError + ")" : "") +
+      "\n  body: " + text.slice(0, RAW_LIMIT)
+    );
+
+    const detail = upstreamMessage(text, data, contentType);
 
     if (res.ok) {
       const result = normalise(data);
       if (result) {
+        step.outcome = "accepted";
         preferredShape = attempt.label;
+        console.log("[classify] ACCEPTED shape=" + attempt.label + " -> " + result.strand);
         return { status: 200, body: result };
       }
 
-      /* 200 with a body we cannot read. If it says success:false the request
-         shape may still be the problem, so let the ladder continue. */
-      console.error("Unrecognised AutoTrain response:", text.slice(0, 600));
+      /* 2xx, but not a prediction we can read — success:false, an empty body,
+         or an edge page served with a 200. The shape may still be at fault, so
+         let the ladder carry on. */
+      step.outcome = "unreadable";
       firstFailure = firstFailure || {
         status: 502,
         body: {
-          error: "the classifier returned something unexpected",
+          error: "AutoTrain replied " + res.status + " but the body held no prediction" +
+            (detail ? ": " + detail : "."),
           upstream_status: res.status,
-          detail: upstreamMessage(text, data),
+          detail,
         },
       };
       continue;
     }
 
-    const detail = upstreamMessage(text, data);
-    console.error("AutoTrain returned", res.status, "for [" + attempt.label + "]:", text.slice(0, 600));
+    step.outcome = "rejected";
+
+    /* The upstream's own words are the message. Only a genuinely empty body
+       falls back to a description, and even then the status is named. */
+    const headline = detail
+      ? "AutoTrain returned " + res.status + ": " + detail
+      : "AutoTrain returned " + res.status + " " + (res.statusText || "") + " with an empty body";
 
     if (res.status === 401 || res.status === 403) {
-      return {
-        status: 500,
-        body: { error: "the classifier rejected our credentials", upstream_status: res.status, detail },
-      };
+      return { status: 502, body: { error: headline, upstream_status: res.status, detail, trace, env } };
     }
     if (res.status === 429) {
-      return {
-        status: 429,
-        body: { error: "the classifier is busy — try again in a moment", upstream_status: res.status, detail },
-      };
+      return { status: 429, body: { error: headline, upstream_status: res.status, detail, trace, env } };
     }
 
     firstFailure = firstFailure || {
       status: 502,
-      body: { error: "the classifier could not score that", upstream_status: res.status, detail },
+      body: { error: headline, upstream_status: res.status, detail },
     };
 
     /* Anything other than a complaint about the body means a different shape
@@ -285,6 +390,8 @@ export async function handleClassify(body, ip = "local") {
   /* Every shape was refused. The first refusal is the honest one to report —
      the later ones only differ in where the model id sat. */
   preferredShape = null;
+  firstFailure.body.trace = trace;
+  firstFailure.body.env = env;
   return firstFailure;
 }
 

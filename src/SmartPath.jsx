@@ -791,10 +791,65 @@ function matchStrandOption(label) {
   return loose || null;
 }
 
+/* Lay the endpoint's trace out as plain text: what went to AutoTrain, what
+   came back, and what the function's own configuration looked like. Rendered
+   in the page and copied verbatim by the Copy button, so a failure can be
+   read — or pasted somewhere useful — without opening the serverless log. */
+function diagText(message, diag) {
+  if (!diag) return message || "";
+  const out = [];
+  out.push(message || "");
+  out.push("");
+
+  const env = diag.env;
+  if (env) {
+    out.push("ENVIRONMENT (as the deployed function sees it)");
+    const line = (name) => {
+      const v = env[name];
+      if (!v) return "  " + name + ": unknown";
+      if (!v.set) return "  " + name + ": NOT SET" + (v.using ? " — using " + v.using : "");
+      if (typeof v.value === "string") return "  " + name + ": SET = " + v.value;
+      return "  " + name + ": SET (" + v.length + " characters, value withheld)";
+    };
+    out.push(line("AUTOTRAIN_URL"));
+    out.push(line("AUTOTRAIN_MODEL_ID"));
+    out.push(line("AUTOTRAIN_API_KEY"));
+    if (env.node) out.push("  node: " + env.node);
+    out.push("");
+  }
+
+  (diag.trace || []).forEach((step, i) => {
+    out.push("ATTEMPT " + (i + 1) + " — " + step.shape + " — " + (step.outcome || "no result"));
+    const req = step.request || {};
+    out.push("  " + (req.method || "POST") + " " + (req.url || ""));
+    Object.entries(req.headers || {}).forEach(([k, v]) => out.push("  " + k + ": " + v));
+    out.push("  body: " + (req.body || ""));
+    const res = step.response;
+    if (res) {
+      out.push("  --> HTTP " + res.status + " " + (res.status_text || ""));
+      out.push("  --> content-type: " + (res.content_type || "none"));
+      Object.entries(res.headers || {}).forEach(([k, v]) => {
+        if (k.toLowerCase() !== "content-type") out.push("  --> " + k + ": " + v);
+      });
+      out.push("  --> body (" + res.body_length + " chars, before JSON parsing" +
+        (res.body_truncated ? ", truncated" : "") + "):");
+      out.push("  " + (res.body_text || "(empty)"));
+      if (res.parse_error) out.push("  --> not valid JSON: " + res.parse_error);
+    } else if (step.error) {
+      out.push("  --> no response: " + step.error);
+    }
+    out.push("");
+  });
+
+  return out.join("\n").trim();
+}
+
 function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfile, save }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [detail, setDetail] = useState("");
+  const [diag, setDiag] = useState(null);
+  const [showDiag, setShowDiag] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [open, setOpen] = useState(false);
 
   /* Work saved before the options carried model values holds prose like
@@ -816,7 +871,9 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
     }
     setBusy(true);
     setError("");
-    setDetail("");
+    setDiag(null);
+    setShowDiag(false);
+    setCopied(false);
     try {
       const res = await fetch("/api/classify", {
         method: "POST",
@@ -825,15 +882,14 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        /* Carry the upstream status and message through so the real cause is
-           readable here rather than only in the serverless log. */
-        if (data && (data.detail || data.upstream_status)) {
-          setDetail(
-            (data.upstream_status ? "AutoTrain returned " + data.upstream_status + ". " : "") +
-              (data.detail || "")
-          );
+        /* The endpoint sends AutoTrain's own words as `error`, plus a trace of
+           every live request and reply. Keep both: the message is shown as-is,
+           and the trace goes behind a toggle so the exact status, headers and
+           raw body can be read here instead of only in the serverless log. */
+        if (data && (data.trace || data.env)) {
+          setDiag({ trace: data.trace || [], env: data.env || null, status: res.status });
         }
-        throw new Error((data && data.error) || "status " + res.status);
+        throw new Error((data && data.error) || "The classifier endpoint returned status " + res.status + ".");
       }
       setResult(data);
       await save({ quiz, quizResult: data });
@@ -841,6 +897,15 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
       setError(e.message || "Could not reach the classifier.");
     }
     setBusy(false);
+  }
+
+  async function copyDiag() {
+    try {
+      await navigator.clipboard.writeText(diagText(error, diag));
+      setCopied(true);
+    } catch (e) {
+      setCopied(false);
+    }
   }
 
   const suggested = result ? matchStrandOption(result.strand) : null;
@@ -903,7 +968,20 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
           </Field>
 
           <Notice kind="error" onRetry={error ? submit : null}>{error}</Notice>
-          {detail ? <p className="sp-detail">{detail}</p> : null}
+          {diag ? (
+            <div className="sp-diag">
+              <div className="sp-diag-bar">
+                <button className="sp-diag-toggle" onClick={() => setShowDiag(!showDiag)}>
+                  {showDiag ? "Hide" : "Show"} the request and reply
+                  {diag.trace.length > 1 ? " (" + diag.trace.length + " attempts)" : ""}
+                </button>
+                <button className="sp-diag-toggle" onClick={copyDiag}>
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              {showDiag ? <pre className="sp-diag-body">{diagText(error, diag)}</pre> : null}
+            </div>
+          ) : null}
 
           <div className="sp-actions">
             <button className="sp-btn sp-btn-primary" onClick={submit} disabled={busy || !answered}>
@@ -2220,9 +2298,16 @@ function Styles() {
 .sp-quiz-ranked li{display:grid;grid-template-columns:minmax(80px,auto) 1fr auto;align-items:center;gap:10px}
 .sp-quiz-rlabel{font-size:13px;font-weight:600}
 /* the upstream's own words, for debugging a failing prediction */
-.sp-detail{font-family:var(--mono);font-size:11.5px;line-height:1.5;color:var(--ink-soft);
+.sp-diag{margin:-4px 0 12px}
+.sp-diag-bar{display:flex;gap:8px;flex-wrap:wrap}
+.sp-diag-toggle{font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--ink-soft);background:var(--chip);border:1px solid var(--line);border-radius:3px;
+  padding:6px 10px;cursor:pointer;transition:border-color .12s,color .12s}
+.sp-diag-toggle:hover{border-color:var(--route);color:var(--ink)}
+.sp-diag-body{font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--ink-soft);
   background:var(--chip);border:1px solid var(--line);border-radius:3px;
-  padding:9px 11px;margin:-4px 0 12px;word-break:break-word}
+  padding:11px 13px;margin:8px 0 0;max-height:340px;overflow:auto;
+  white-space:pre-wrap;word-break:break-word}
 /* the compare strip pins its bar to column 1 on narrow screens; the ranked
    list here is a three-column row at every width, so opt out of that. */
 .sp-quiz-ranked .sp-compare-track{grid-column:auto}

@@ -74,8 +74,9 @@ for (const v of variants) {
   }
   const ms = Date.now() - started;
   console.log("  -> HTTP " + res.status + " " + res.statusText + "  (" + ms + "ms)");
-  console.log("  -> content-type: " + (res.headers.get("content-type") || "none"));
-  console.log("  -> body: " + text.slice(0, 700) + (text.length > 700 ? " …[truncated]" : ""));
+  for (const [k, v] of res.headers) console.log("  -> " + k + ": " + v);
+  console.log("  -> body (" + text.length + " chars, before JSON parsing):");
+  console.log("     " + text.slice(0, 2000) + (text.length > 2000 ? " …[truncated]" : ""));
 
   if (res.ok) {
     try {
