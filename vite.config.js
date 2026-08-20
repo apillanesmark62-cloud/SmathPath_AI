@@ -1,62 +1,81 @@
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
-/* Serves /api/chat during `npm run dev` using the same handler Netlify runs in
-   production, so local development matches the deployed behaviour. The API key
-   is read from the shell environment or a local .env file and stays in this
-   Node process — Vite only ever bundles VITE_-prefixed variables into the
-   client, and there are none, so the key cannot leak into the browser. */
+/* Serves the /api/* endpoints during `npm run dev` using the same handlers
+   Netlify runs in production, so local development matches the deployed
+   behaviour. Secrets are read from the shell environment or a local .env file
+   and stay in this Node process — Vite only ever bundles VITE_-prefixed
+   variables into the client, and there are none, so no key can leak into the
+   browser. */
+const API_ROUTES = [
+  { path: "/api/chat", module: "netlify/functions/chat.mjs", handler: "handleChat" },
+  { path: "/api/classify", module: "netlify/functions/classify.mjs", handler: "handleClassify" },
+];
+
 function apiDevServer() {
-  let handleChat;
+  const loaded = new Map();
 
   return {
     name: "smartpath-api-dev",
     apply: "serve",
     configureServer(server) {
-      server.middlewares.use("/api/chat", async (req, res) => {
-        const send = (status, payload) => {
-          res.statusCode = status;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify(payload));
-        };
+      for (const route of API_ROUTES) {
+        server.middlewares.use(route.path, async (req, res) => {
+          const send = (status, payload) => {
+            res.statusCode = status;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify(payload));
+          };
 
-        if (req.method !== "POST") {
-          res.setHeader("Allow", "POST");
-          send(405, { error: "use POST" });
-          return;
-        }
+          if (req.method !== "POST") {
+            res.setHeader("Allow", "POST");
+            send(405, { error: "use POST" });
+            return;
+          }
 
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
 
-        let body;
-        try {
-          body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        } catch (e) {
-          send(400, { error: "Request body must be JSON." });
-          return;
-        }
+          let body;
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          } catch (e) {
+            send(400, { error: "Request body must be JSON." });
+            return;
+          }
 
-        try {
-          if (!handleChat) ({ handleChat } = await import("./netlify/functions/chat.mjs"));
-          const result = await handleChat(body, req.socket.remoteAddress || "local");
-          send(result.status, result.body);
-        } catch (e) {
-          server.config.logger.error("[smartpath] /api/chat failed: " + (e && e.message ? e.message : e));
-          send(500, { error: "the dev API handler crashed — see the terminal" });
-        }
-      });
+          try {
+            if (!loaded.has(route.path)) {
+              /* Resolve from the project root: Vite may bundle this config into
+                 node_modules/.vite-temp, and a dynamic specifier would then be
+                 resolved relative to that directory instead of the repo. */
+              const url = pathToFileURL(resolve(process.cwd(), route.module)).href;
+              const mod = await import(url);
+              loaded.set(route.path, mod[route.handler]);
+            }
+            const result = await loaded.get(route.path)(body, req.socket.remoteAddress || "local");
+            send(result.status, result.body);
+          } catch (e) {
+            server.config.logger.error(
+              "[smartpath] " + route.path + " failed: " + (e && e.message ? e.message : e)
+            );
+            send(500, { error: "the dev API handler crashed — see the terminal" });
+          }
+        });
+      }
     },
   };
 }
 
 export default defineConfig(({ mode }) => {
-  /* Make ANTHROPIC_API_KEY from a local .env visible to the dev handler.
-     The third argument is "" so unprefixed variables are read too; nothing
-     here is passed to the client bundle. */
+  /* Make the server-side secrets from a local .env visible to the dev
+     handlers. The third argument is "" so unprefixed variables are read too;
+     nothing here is passed to the client bundle. */
   const env = loadEnv(mode, process.cwd(), "");
-  if (!process.env.ANTHROPIC_API_KEY && env.ANTHROPIC_API_KEY) {
-    process.env.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
+  for (const key of ["ANTHROPIC_API_KEY", "HF_CLASSIFIER_URL", "HF_API_TOKEN", "HF_CLASSIFIER_FORMAT"]) {
+    if (!process.env[key] && env[key]) process.env[key] = env[key];
   }
 
   return {

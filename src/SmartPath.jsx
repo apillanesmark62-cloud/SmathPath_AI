@@ -719,6 +719,229 @@ function ProfileTab({ profile, setProfile, onSaved, goMatch }) {
   );
 }
 
+/* ---------------- strand classifier ---------------- */
+/* The eight features the AutoTrain model was trained on. The seven ratings are
+   1-5; preferred_activity is a category. Keep this list and the ACTIVITIES
+   list below in step with netlify/functions/classify.mjs. */
+const CLASSIFIER_QUESTIONS = [
+  { key: "math_interest", label: "Math", hint: "Numbers, patterns, problem sets" },
+  { key: "science_interest", label: "Science", hint: "Experiments, how things work" },
+  { key: "business_interest", label: "Business", hint: "Selling, money, running things" },
+  { key: "communication_interest", label: "Communication", hint: "Writing, speaking, persuading" },
+  { key: "technology_interest", label: "Technology", hint: "Computers, apps, systems" },
+  { key: "creative_interest", label: "Creative work", hint: "Drawing, design, music, video" },
+  { key: "hands_on_interest", label: "Hands-on work", hint: "Building, repairing, cooking, machines" },
+];
+
+const CLASSIFIER_ACTIVITIES = [
+  "Solving math problems",
+  "Doing science experiments",
+  "Running a small business",
+  "Writing or speaking",
+  "Working with computers",
+  "Drawing or designing",
+  "Building or repairing things",
+];
+
+const RATING_WORDS = ["Not at all", "A little", "Somewhat", "A lot", "Very much"];
+
+const blankQuiz = {
+  math_interest: 3,
+  science_interest: 3,
+  business_interest: 3,
+  communication_interest: 3,
+  technology_interest: 3,
+  creative_interest: 3,
+  hands_on_interest: 3,
+  preferred_activity: "",
+};
+
+/* The model's label may be a bare strand ("STEM") or a number, while the
+   profile dropdown carries fuller names ("TVL — ICT"). Line them up when we
+   can so the prediction can be applied to the profile in one click. */
+const STRAND_OPTIONS = [
+  "STEM", "ABM", "HUMSS", "GAS",
+  "TVL — Home Economics", "TVL — ICT", "TVL — Industrial Arts", "TVL — Agri-Fishery",
+  "Arts and Design", "Sports",
+];
+
+function matchStrandOption(label) {
+  const key = String(label || "").trim().toLowerCase();
+  if (!key) return null;
+  const exact = STRAND_OPTIONS.find((o) => o.toLowerCase() === key);
+  if (exact) return exact;
+  const loose = STRAND_OPTIONS.find(
+    (o) => o.toLowerCase().replace(/[^a-z]/g, "") === key.replace(/[^a-z]/g, "")
+  );
+  if (loose) return loose;
+  const starts = STRAND_OPTIONS.find((o) => o.toLowerCase().startsWith(key) || key.startsWith(o.toLowerCase()));
+  return starts || null;
+}
+
+function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfile, save }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const answered = !!quiz.preferred_activity;
+
+  function set(key, value) {
+    const next = { ...quiz, [key]: value };
+    setQuiz(next);
+    setResult(null);
+  }
+
+  async function submit() {
+    if (!answered) {
+      setError("Pick the activity you would rather do before submitting.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/classify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers: quiz }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error((data && data.error) || "status " + res.status);
+      }
+      setResult(data);
+      await save({ quiz, quizResult: data });
+    } catch (e) {
+      setError(e.message || "Could not reach the classifier.");
+    }
+    setBusy(false);
+  }
+
+  const suggested = result ? matchStrandOption(result.strand) : null;
+  const applied = suggested && profile.strand === suggested;
+
+  return (
+    <section className="sp-quiz">
+      <button className="sp-quiz-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <div>
+          <span className="sp-chip-label">Strand classifier</span>
+          <h3 className="sp-quiz-title">Which strand suits you?</h3>
+          <p className="sp-quiz-sub">
+            {result
+              ? "The model suggests " + result.strand + ". Open to change your answers."
+              : "Eight quick questions, scored by SmartPath's trained model."}
+          </p>
+        </div>
+        <span className={"sp-quiz-caret" + (open ? " is-open" : "")}>
+          <Icon name="caret" size={18} />
+        </span>
+      </button>
+
+      {open ? (
+        <div className="sp-quiz-body">
+          {CLASSIFIER_QUESTIONS.map((q) => (
+            <div key={q.key} className="sp-rating">
+              <div className="sp-rating-top">
+                <span className="sp-rating-label">{q.label}</span>
+                <span className="sp-rating-word">{RATING_WORDS[quiz[q.key] - 1]}</span>
+              </div>
+              <div className="sp-rating-scale" role="radiogroup" aria-label={q.label}>
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    role="radio"
+                    aria-checked={quiz[q.key] === n}
+                    aria-label={RATING_WORDS[n - 1]}
+                    className={"sp-rating-dot" + (quiz[q.key] === n ? " is-on" : "")}
+                    onClick={() => set(q.key, n)}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <span className="sp-hint">{q.hint}</span>
+            </div>
+          ))}
+
+          <Field label="Which would you rather do?" hint="Pick the one closest to how you like to spend time.">
+            <select
+              className="sp-input"
+              value={quiz.preferred_activity}
+              onChange={(e) => set("preferred_activity", e.target.value)}
+            >
+              <option value="">Choose one…</option>
+              {CLASSIFIER_ACTIVITIES.map((a) => (
+                <option key={a}>{a}</option>
+              ))}
+            </select>
+          </Field>
+
+          <Notice kind="error" onRetry={error ? submit : null}>{error}</Notice>
+
+          <div className="sp-actions">
+            <button className="sp-btn sp-btn-primary" onClick={submit} disabled={busy || !answered}>
+              {busy ? "Scoring…" : result ? "Score again" : "See my strand"}
+            </button>
+            {!answered ? <span className="sp-hint">Pick an activity to finish.</span> : null}
+          </div>
+          {busy ? <Loading label="Sending your answers to the model…" /> : null}
+        </div>
+      ) : null}
+
+      {result ? (
+        <div className="sp-quiz-result sp-fade">
+          <div className="sp-quiz-verdict">
+            <span className="sp-chip-label">Predicted strand</span>
+            <strong className="sp-quiz-strand">{result.strand}</strong>
+            {typeof result.confidence === "number" ? (
+              <span className="sp-quiz-conf">{Math.round(result.confidence * 100)}% confidence</span>
+            ) : null}
+          </div>
+
+          {(result.ranked || []).length > 1 ? (
+            <ul className="sp-quiz-ranked">
+              {result.ranked.map((r) => (
+                <li key={r.label}>
+                  <span className="sp-quiz-rlabel">{r.label}</span>
+                  <span className="sp-compare-track">
+                    <span
+                      className="sp-compare-fill"
+                      style={{ width: Math.round(Math.max(0, Math.min(1, r.score || 0)) * 100) + "%" }}
+                    />
+                  </span>
+                  <span className="sp-compare-num">
+                    {typeof r.score === "number" ? Math.round(r.score * 100) : "—"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {suggested ? (
+            <div className="sp-actions">
+              <button
+                className="sp-btn sp-btn-small"
+                disabled={applied}
+                onClick={async () => {
+                  const next = { ...profile, strand: suggested };
+                  setProfile(next);
+                  await save({ profile: next });
+                }}
+              >
+                {applied ? "Saved to your profile" : "Use " + suggested + " in my profile"}
+              </button>
+            </div>
+          ) : null}
+
+          <p className="sp-fineprint">
+            This is a prediction from a model trained on past student answers, not a decision.
+            Your interests and the careers below matter more than one label.
+          </p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 /* ---------------- career match ---------------- */
 const ROUTES = {
   degree: "4-year degree",
@@ -742,7 +965,8 @@ function slug(s) {
   return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-function MatchTab({ profile, careers, setCareers, chosen, setChosen, roadmap, setRoadmap, save, goResume }) {
+function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen, roadmap, setRoadmap,
+  quiz, setQuiz, quizResult, setQuizResult, save, goResume }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mapBusy, setMapBusy] = useState(false);
@@ -815,6 +1039,9 @@ function MatchTab({ profile, careers, setCareers, chosen, setChosen, roadmap, se
           interview practice — you can switch any time.
         </p>
       </header>
+
+      <StrandClassifier quiz={quiz} setQuiz={setQuiz} result={quizResult} setResult={setQuizResult}
+        profile={profile} setProfile={setProfile} save={save} />
 
       <Notice kind="error" onRetry={error ? run : null}>{error}</Notice>
       {busy ? <Loading label="Reading your profile and matching careers…" /> : null}
@@ -1478,6 +1705,8 @@ export default function SmartPath() {
   const [prep, setPrep] = useState(null);
   const [scores, setScores] = useState({});
   const [chat, setChat] = useState([]);
+  const [quiz, setQuiz] = useState(blankQuiz);
+  const [quizResult, setQuizResult] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1509,6 +1738,8 @@ export default function SmartPath() {
     setPrep(d.prep || null);
     setScores(d.scores || {});
     setChat(d.chat || []);
+    setQuiz({ ...blankQuiz, ...(d.quiz || {}) });
+    setQuizResult(d.quizResult || null);
     setUser(u);
     setTab("home");
   }
@@ -1518,7 +1749,7 @@ export default function SmartPath() {
     const current = (await store.get("data:" + user)) || {};
     await store.set("data:" + user, {
       ...current, profile, careers, chosen, roadmap, resume,
-      resumeBuilt: built, prep, scores, chat, ...(patch || {}),
+      resumeBuilt: built, prep, scores, chat, quiz, quizResult, ...(patch || {}),
     });
   }
 
@@ -1526,7 +1757,7 @@ export default function SmartPath() {
     await store.set("session", {});
     setUser(null); setProfile(blankProfile); setCareers([]); setChosen("");
     setRoadmap(null); setResume(blankResume); setBuilt(null); setPrep(null);
-    setScores({}); setChat([]); setTab("home");
+    setScores({}); setChat([]); setQuiz(blankQuiz); setQuizResult(null); setTab("home");
   }
 
   const done = {
@@ -1568,9 +1799,10 @@ export default function SmartPath() {
             goMatch={() => { save({ profile }); setTab("match"); }} />
         ) : null}
         {tab === "match" ? (
-          <MatchTab profile={profile} careers={careers} setCareers={setCareers} chosen={chosen}
-            setChosen={setChosen} roadmap={roadmap} setRoadmap={setRoadmap} save={save}
-            goResume={() => setTab("resume")} />
+          <MatchTab profile={profile} setProfile={setProfile} careers={careers} setCareers={setCareers}
+            chosen={chosen} setChosen={setChosen} roadmap={roadmap} setRoadmap={setRoadmap}
+            quiz={quiz} setQuiz={setQuiz} quizResult={quizResult} setQuizResult={setQuizResult}
+            save={save} goResume={() => setTab("resume")} />
         ) : null}
         {tab === "resume" ? (
           <ResumeTab profile={profile} resume={resume} setResume={setResume} built={built}
@@ -1917,6 +2149,42 @@ function Styles() {
 .sp-picker-opt.is-active{background:var(--chip)}
 .sp-picker-opt.is-chosen{color:var(--route);font-weight:600}
 .sp-picker-none{margin:0;padding:14px 13px;font-size:13px;line-height:1.5;color:var(--ink-soft)}
+
+/* strand classifier */
+.sp-quiz{background:var(--card);border:1.5px solid var(--line);border-left:4px solid var(--signal);
+  border-radius:5px;margin-bottom:16px;overflow:hidden}
+.sp-quiz-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;width:100%;
+  background:none;border:none;padding:16px 18px;cursor:pointer;text-align:left;font-family:inherit}
+.sp-quiz-title{font-family:var(--display);font-weight:700;font-size:17px;margin:4px 0 0;color:var(--ink)}
+.sp-quiz-sub{margin:5px 0 0;font-size:13px;line-height:1.5;color:var(--ink-soft)}
+.sp-quiz-caret{color:var(--ink-soft);display:flex;padding-top:14px;transition:transform .18s}
+.sp-quiz-caret.is-open{transform:rotate(180deg);color:var(--route)}
+.sp-quiz-body{padding:0 18px 6px;border-top:1px solid var(--line)}
+.sp-quiz-body .sp-field:first-of-type{margin-top:4px}
+
+.sp-rating{padding:13px 0;border-bottom:1px solid var(--line)}
+.sp-rating-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:8px}
+.sp-rating-label{font-size:14px;font-weight:600}
+.sp-rating-word{font-family:var(--mono);font-size:11px;color:var(--route)}
+.sp-rating-scale{display:flex;gap:6px}
+.sp-rating-dot{flex:1;min-width:0;height:38px;background:var(--card);border:1.5px solid var(--line);
+  border-radius:4px;font-family:var(--mono);font-size:13px;color:var(--ink-soft);cursor:pointer;
+  transition:background .12s,border-color .12s,color .12s}
+.sp-rating-dot:hover{border-color:var(--route)}
+.sp-rating-dot.is-on{background:var(--panel);border-color:var(--panel);color:var(--on-panel)}
+.sp-rating .sp-hint{display:block;margin-top:6px}
+
+.sp-quiz-result{padding:16px 18px;border-top:1px solid var(--line);background:var(--chip)}
+.sp-quiz-verdict{display:flex;align-items:baseline;flex-wrap:wrap;gap:10px}
+.sp-quiz-verdict .sp-chip-label{flex:0 0 100%;margin-bottom:0}
+.sp-quiz-strand{font-family:var(--display);font-weight:800;font-size:24px;letter-spacing:-.01em;color:var(--ink)}
+.sp-quiz-conf{font-family:var(--mono);font-size:12px;color:var(--route)}
+.sp-quiz-ranked{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
+.sp-quiz-ranked li{display:grid;grid-template-columns:minmax(80px,auto) 1fr auto;align-items:center;gap:10px}
+.sp-quiz-rlabel{font-size:13px;font-weight:600}
+/* the compare strip pins its bar to column 1 on narrow screens; the ranked
+   list here is a three-column row at every width, so opt out of that. */
+.sp-quiz-ranked .sp-compare-track{grid-column:auto}
 
 /* career match: compare strip, filters, badges */
 .sp-compare{background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:15px 16px;margin-bottom:14px}

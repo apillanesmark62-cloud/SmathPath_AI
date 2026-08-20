@@ -9,14 +9,15 @@ key so it never reaches the browser.
 ## Project layout
 
 ```
-index.html                  page shell
-src/main.jsx                React entry point
-src/SmartPath.jsx           the whole app (UI, styles, logic)
-src/data/places.js          Philippine cities, provinces and schools for the pickers
-src/index.css               minimal page reset
-netlify/functions/chat.mjs  server-side AI endpoint (holds the API key)
-vite.config.js              build config + /api/chat middleware for `npm run dev`
-netlify.toml                build, routing and header config for Netlify
+index.html                      page shell
+src/main.jsx                    React entry point
+src/SmartPath.jsx               the whole app (UI, styles, logic)
+src/data/places.js              Philippine cities, provinces and schools
+src/index.css                   minimal page reset
+netlify/functions/chat.mjs      Anthropic endpoint (holds the API key)
+netlify/functions/classify.mjs  strand classifier endpoint (holds the HF token)
+vite.config.js                  build config + /api/* middleware for `npm run dev`
+netlify.toml                    build, routing and header config for Netlify
 ```
 
 ## Features
@@ -72,6 +73,46 @@ of `degree`, `short` (TESDA or a certificate) or `work`, which drives the
 "No 4-year degree needed" filter — so the students who cannot go straight to
 college can find their options in one click.
 
+### Strand classifier
+
+The **Career match** tab opens with an eight-question form scored by the
+AutoTrain model on Hugging Face. Seven questions are 1-5 interest ratings and
+the eighth is a category, matching the model's features:
+
+| Feature | Input |
+| --- | --- |
+| `math_interest` | rating, 1-5 |
+| `science_interest` | rating, 1-5 |
+| `business_interest` | rating, 1-5 |
+| `communication_interest` | rating, 1-5 |
+| `technology_interest` | rating, 1-5 |
+| `creative_interest` | rating, 1-5 |
+| `hands_on_interest` | rating, 1-5 |
+| `preferred_activity` | one of seven activities |
+
+Submitting posts to `/api/classify`, which adds the Hugging Face token
+server-side and calls the model. The predicted strand is shown with its
+confidence and a ranked bar for each label, and can be written to the
+student's profile in one click. Answers and the result are saved with the rest
+of their work, so both survive a reload.
+
+Configure it with `HF_CLASSIFIER_URL`, `HF_API_TOKEN` and optionally
+`HF_CLASSIFIER_FORMAT` (see `.env.example`). Until those are set the form
+renders and validates but returns "the classifier is not configured yet"
+instead of a prediction — the rest of SmartPath is unaffected.
+
+**Response shapes.** Hugging Face returns different shapes per task, so
+`netlify/functions/classify.mjs` normalises `[{label, score}]`,
+`[[{label, score}]]`, `{predictions: [...]}` and a bare `["STEM"]` into one
+`{ strand, confidence, ranked }` result. A cold serverless model answers `503`
+with an estimated load time; the function waits and retries once.
+
+**Keep in step.** The `FEATURES` and `ACTIVITIES` lists in
+`netlify/functions/classify.mjs` and the `CLASSIFIER_QUESTIONS` /
+`CLASSIFIER_ACTIVITIES` lists in `src/SmartPath.jsx` describe the same model
+inputs. If the model is retrained with different features or activity labels,
+change both.
+
 ## Running it locally
 
 ```bash
@@ -105,14 +146,18 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | Key | Value |
    | --- | --- |
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
+   | `HF_CLASSIFIER_URL` | your AutoTrain model's inference URL |
+   | `HF_API_TOKEN` | a Hugging Face access token |
+   | `HF_CLASSIFIER_FORMAT` | `tabular` (default) or `text` |
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 
 ## How the API key is protected
 
-The browser never sees a key. It posts to `/api/chat` on your own origin;
-Netlify routes that to `netlify/functions/chat.mjs`, which reads
-`ANTHROPIC_API_KEY` from the server environment and calls Anthropic.
+The browser never sees a key. It posts to `/api/chat` and `/api/classify` on
+your own origin; Netlify routes those to `netlify/functions/chat.mjs` and
+`netlify/functions/classify.mjs`, which read `ANTHROPIC_API_KEY` and
+`HF_API_TOKEN` from the server environment and call Anthropic and Hugging Face.
 
 Two things keep it that way:
 
@@ -125,7 +170,7 @@ To confirm after a build, search `dist/` — there should be no key and no
 `api.anthropic.com`:
 
 ```bash
-npm run build && grep -ri "sk-ant\|api.anthropic.com" dist/ ; echo "exit $? (1 = clean)"
+npm run build && grep -ri "sk-ant\|hf_\|api.anthropic.com\|huggingface" dist/ ; echo "exit $? (1 = clean)"
 ```
 
 The endpoint also pins the model server-side, validates the request shape, caps

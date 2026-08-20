@@ -6,10 +6,16 @@
 [build.environment]
   NODE_VERSION = "22"
 
-# The browser calls /api/chat; Netlify routes it to the serverless function.
+# The browser calls /api/*; Netlify routes each to its serverless function.
 [[redirects]]
   from = "/api/chat"
   to = "/.netlify/functions/chat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/classify"
+  to = "/.netlify/functions/classify"
   status = 200
   force = true
 
