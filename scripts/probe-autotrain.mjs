@@ -13,7 +13,10 @@
    request here is real; nothing is mocked.
 
      npm run probe:autotrain
-     npm run probe:autotrain -- --url=https://api.autotrain.app/api/autotrain
+     npm run probe:autotrain -- --refresh-token=... --firebase-key=AIza...
+
+   With no arguments it reads .env, so the two values can be checked before
+   they are ever typed into Netlify.
 
    Paste the output back and the fix is one environment variable.
    ========================================================== */
@@ -27,9 +30,121 @@ const args = Object.fromEntries(
 
 const { DEFAULT_URL } = await import("../netlify/functions/classify.mjs");
 const BASE = args.url || process.env.AUTOTRAIN_URL || DEFAULT_URL;
-const API_KEY = args.key || process.env.AUTOTRAIN_API_KEY || "";
+
+/* Read a local .env if there is one, so the values can be checked before they
+   are ever typed into Netlify. Nothing is written and nothing is echoed. */
+try {
+  const text = await (await import("node:fs/promises")).readFile(new URL("../.env", import.meta.url), "utf8");
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
+  }
+} catch (e) {
+  /* no .env — flags and the shell environment still apply */
+}
+
+const REFRESH_TOKEN = args["refresh-token"] || process.env.AUTOTRAIN_REFRESH_TOKEN || "";
+const FIREBASE_KEY =
+  args["firebase-key"] ||
+  process.env.AUTOTRAIN_FIREBASE_API_KEY ||
+  process.env.AUTOTRAIN_FIREBASE_APIKEY ||
+  "";
+
+let API_KEY = args.key || process.env.AUTOTRAIN_API_KEY || "";
 
 const origin = new URL(BASE).origin;
+const line = "=".repeat(72);
+
+/* Read a JWT's expiry without verifying it — we only want to know if it is
+   already dead, which is the usual reason a pasted token stops working. */
+function expiryOf(jwt) {
+  try {
+    const claims = JSON.parse(Buffer.from(String(jwt).split(".")[1], "base64url").toString("utf8"));
+    return typeof claims.exp === "number" ? claims.exp * 1000 : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ---- 0. check the credentials before anything else ---------------------- */
+
+async function checkCredentials() {
+  console.log(line);
+  console.log("0. Credentials");
+  console.log(line);
+
+  if (API_KEY) {
+    const exp = expiryOf(API_KEY);
+    if (exp === null) {
+      console.log("  AUTOTRAIN_API_KEY: set, not a JWT — assuming it does not expire");
+    } else if (exp <= Date.now()) {
+      const mins = Math.round((Date.now() - exp) / 60000);
+      console.log("  AUTOTRAIN_API_KEY: EXPIRED " + mins + " minutes ago (" + new Date(exp).toISOString() + ")");
+    } else {
+      console.log("  AUTOTRAIN_API_KEY: valid for another " +
+        Math.round((exp - Date.now()) / 60000) + " minutes");
+    }
+  } else {
+    console.log("  AUTOTRAIN_API_KEY: not set");
+  }
+
+  if (!REFRESH_TOKEN && !FIREBASE_KEY) {
+    console.log("  refresh: not configured (AUTOTRAIN_REFRESH_TOKEN + a Firebase key)");
+    return;
+  }
+  if (!REFRESH_TOKEN || !FIREBASE_KEY) {
+    console.log("  refresh: HALF CONFIGURED — " +
+      (REFRESH_TOKEN ? "the Firebase API key is missing" : "AUTOTRAIN_REFRESH_TOKEN is missing"));
+    console.log("           both are needed; neither is optional");
+    return;
+  }
+
+  console.log("  refresh: exchanging the refresh token for a fresh ID token…");
+  const endpoint = process.env.AUTOTRAIN_TOKEN_ENDPOINT || "https://securetoken.googleapis.com/v1/token";
+  let res, text;
+  try {
+    res = await fetch(endpoint + "?key=" + encodeURIComponent(FIREBASE_KEY), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: REFRESH_TOKEN }).toString(),
+    });
+    text = await res.text();
+  } catch (e) {
+    console.log("  ❌ could not reach the token service: " + (e && e.message ? e.message : e));
+    return;
+  }
+
+  if (!res.ok) {
+    let why = text.slice(0, 300);
+    try {
+      const j = JSON.parse(text);
+      why = (j.error && (j.error.message || JSON.stringify(j.error))) || why;
+    } catch (e) {
+      /* keep the raw text */
+    }
+    console.log("  ❌ HTTP " + res.status + " — " + why);
+    if (/API_KEY|API key/i.test(why)) {
+      console.log("     The Firebase API key is wrong. It is the ?key= value on requests to");
+      console.log("     securetoken.googleapis.com or identitytoolkit.googleapis.com, and starts AIza.");
+    } else if (/TOKEN_EXPIRED|USER_DISABLED|INVALID_REFRESH_TOKEN|USER_NOT_FOUND/i.test(why)) {
+      console.log("     The refresh token is no longer valid. Sign in to AutoTrain again and copy a");
+      console.log("     new one from DevTools -> Application -> IndexedDB -> firebaseLocalStorage");
+      console.log("     -> your user record -> stsTokenManager -> refreshToken.");
+    }
+    return;
+  }
+
+  const data = JSON.parse(text);
+  const token = data.id_token || data.access_token;
+  const exp = expiryOf(token);
+  console.log("  ✅ minted an ID token" + (exp ? ", good until " + new Date(exp).toISOString() : ""));
+  console.log("     Both values are correct. Set them in Netlify and the classifier will renew");
+  console.log("     its own token from here on.");
+  API_KEY = token;
+}
+
+await checkCredentials();
+console.log();
 
 /* The exact row from the working Testing Console request. */
 const ROW = {
@@ -47,7 +162,6 @@ const BODY = JSON.stringify({ data: [ROW] });
 const headers = { "Content-Type": "application/json", Accept: "application/json" };
 if (API_KEY) headers.Authorization = "Bearer " + API_KEY;
 
-const line = "=".repeat(72);
 
 /* ---------- 1. ask the app for its own route table ---------------------- */
 
