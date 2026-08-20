@@ -14,7 +14,6 @@
    request here is real; nothing is mocked.
 
      npm run probe:autotrain
-     npm run probe:autotrain -- --model-id=cdf2edb7-cddd-4abb-9124-93a90d53d3f2
      npm run probe:autotrain -- --url=https://api.autotrain.app/api/autotrain
 
    Paste the output back and the fix is one environment variable.
@@ -28,7 +27,6 @@ const args = Object.fromEntries(
 );
 
 const BASE = args.url || process.env.AUTOTRAIN_URL || "https://api.autotrain.app/api/autotrain";
-const MODEL_ID = args["model-id"] || process.env.AUTOTRAIN_MODEL_ID || "";
 const API_KEY = args.key || process.env.AUTOTRAIN_API_KEY || "";
 
 const origin = new URL(BASE).origin;
@@ -115,14 +113,6 @@ function candidates() {
     "/api/inference",
     "/predict",
   ];
-  if (MODEL_ID) {
-    out.push(
-      basePath + "/" + MODEL_ID,
-      basePath + "/" + MODEL_ID + "/predict",
-      "/api/models/" + MODEL_ID + "/predict",
-      "/api/predict/" + MODEL_ID
-    );
-  }
   return [...new Set(out)];
 }
 

@@ -10,20 +10,14 @@
    AutoTrain Testing Console verbatim — see README.
 
    Environment variables:
-     AUTOTRAIN_URL      optional — defaults to the project's endpoint below.
+     AUTOTRAIN_URL      REQUIRED. The prediction endpoint. The fallback below
+                        answers 404 {"detail":"Not Found"} — the origin is
+                        reachable but has no route there — so it exists only to
+                        produce a diagnosable failure rather than a silent one.
+                        Set this to the URL your Testing Console posts to.
      AUTOTRAIN_API_KEY  optional — sent as "Authorization: Bearer <key>" when
                         set. The working sample sends no auth header, so this
-                        is left unset unless the deployment starts requiring
-                        one.
-     AUTOTRAIN_MODEL_ID optional — the model to score against. /api/autotrain is
-                        a shared endpoint and its reply echoes a model_id, so a
-                        request that does not name a model may be rejected.
-                        Where the id belongs in the request is not documented,
-                        so when this is set the function tries each plausible
-                        position in turn (top level, inside the row, query
-                        string) and uses the first one the endpoint accepts,
-                        remembering it for later requests. Unset by default:
-                        the request then matches the working sample exactly.
+                        is left unset unless the endpoint turns out to want one.
    ========================================================== */
 
 const DEFAULT_URL = "https://api.autotrain.app/api/autotrain";
@@ -112,40 +106,27 @@ function validate(body) {
    job_id, but the sample request does not carry either, so the Testing Console
    must attach the id somewhere we cannot see. Rather than guess one position,
    try them in turn and keep whichever the endpoint accepts. */
+/* The request body is exactly the one confirmed working in the Testing
+   Console — one row of the eight feature columns under "data" — and nothing
+   varies it. The 404 proved the path was wrong rather than the payload, so
+   there is nothing about the body left to negotiate.
+
+   The one URL variation worth keeping is a trailing slash: a FastAPI app with
+   redirect_slashes turned off answers a path missing its slash with a flat 404
+   rather than a redirect, and a FastAPI 404 is exactly what came back. */
 function attemptsFor(answers, baseUrl) {
   const row = {};
   for (const f of FEATURES) row[f] = answers[f];
+  const body = { data: [row] };
 
-  const list = [];
-  const modelId = process.env.AUTOTRAIN_MODEL_ID;
+  const list = [{ label: "the endpoint as configured", url: baseUrl, body }];
 
-  if (modelId) {
-    list.push({ label: "model_id at top level", url: baseUrl, body: { data: [row], model_id: modelId } });
-    list.push({ label: "model_id inside the row", url: baseUrl, body: { data: [{ ...row, model_id: modelId }] } });
-    list.push({ label: "model_id as a query parameter", url: withModelQuery(baseUrl, modelId), body: { data: [row] } });
-  }
-
-  list.push({ label: "data only", url: baseUrl, body: { data: [row] } });
-
-  /* A FastAPI app with redirect_slashes turned off answers a path missing its
-     trailing slash with a flat 404 rather than a redirect, so the same URL
-     with one is worth one try before giving up. */
   const slashed = withTrailingSlash(baseUrl);
   if (slashed !== baseUrl) {
-    list.push({ label: "data only, trailing slash", url: slashed, body: { data: [row] } });
+    list.push({ label: "the same URL with a trailing slash", url: slashed, body });
   }
 
   return list;
-}
-
-function withModelQuery(url, modelId) {
-  try {
-    const u = new URL(url);
-    u.searchParams.set("model_id", modelId);
-    return u.href;
-  } catch (e) {
-    return url;
-  }
 }
 
 function withTrailingSlash(url) {
@@ -165,11 +146,13 @@ function withTrailingSlash(url) {
 function readStatus(status, contentType) {
   if (status === 404) {
     const json = /json/i.test(contentType || "");
+    const unset = !process.env.AUTOTRAIN_URL;
     return (
-      "A 404" + (json ? " with a JSON body" : "") + " means the server answered but has no route at " +
-      "that path — so the endpoint URL is wrong, not the questionnaire or the request body. " +
+      "A 404" + (json ? " with a JSON body" : "") + " means the server answered but has no route " +
+      "at that path — so the endpoint URL is wrong, not the questionnaire or the request body. " +
+      (unset ? "AUTOTRAIN_URL is not set, so this used the built-in fallback, which is known to answer 404. " : "") +
       "Open your AutoTrain Testing Console with the browser's Network tab recording, run one " +
-      "prediction, and copy the URL it actually posts to; then set AUTOTRAIN_URL to that."
+      "prediction, and copy the URL it actually posts to; then set AUTOTRAIN_URL to that and redeploy."
     );
   }
   if (status === 405) {
@@ -184,13 +167,13 @@ function readStatus(status, contentType) {
   return null;
 }
 
-/* A rejection worth retrying with a different shape — the endpoint understood
-   us and disliked the body. Auth, rate limits and server faults are not about
-   shape, so those stop the ladder immediately. */
-const SHAPE_ERRORS = new Set([400, 404, 415, 422]);
+/* Only a 404 earns a second URL: it is the one status meaning "no route here",
+   which the trailing-slash variant can answer. Every other refusal is about
+   the request or the server, and repeating it would only add noise. */
+const RETRYABLE = new Set([404]);
 
 /* Remembered for the life of the instance, so only the first request after a
-   cold start pays for the search. */
+   cold start pays for the extra round trip. */
 let preferredShape = null;
 
 /* How much of a raw upstream body to keep per attempt. Generous on purpose:
@@ -236,11 +219,11 @@ function upstreamMessage(text, data, contentType) {
 function envReport() {
   const url = process.env.AUTOTRAIN_URL;
   const key = process.env.AUTOTRAIN_API_KEY;
-  const model = process.env.AUTOTRAIN_MODEL_ID;
   return {
-    AUTOTRAIN_URL: url ? { set: true, value: url } : { set: false, using: DEFAULT_URL + " (built-in default)" },
+    AUTOTRAIN_URL: url
+      ? { set: true, value: url }
+      : { set: false, using: DEFAULT_URL + " (built-in fallback — known to answer 404)" },
     AUTOTRAIN_API_KEY: key ? { set: true, length: key.length } : { set: false },
-    AUTOTRAIN_MODEL_ID: model ? { set: true, length: model.length, value: model } : { set: false },
     node: typeof process !== "undefined" && process.version ? process.version : "unknown",
   };
 }
@@ -433,7 +416,7 @@ export async function handleClassify(body, ip = "local") {
 
     /* Anything other than a complaint about the body means a different shape
        will not help. */
-    if (!SHAPE_ERRORS.has(res.status)) break;
+    if (!RETRYABLE.has(res.status)) break;
   }
 
   /* Every shape was refused. The first refusal is the honest one to report —

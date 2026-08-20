@@ -816,7 +816,6 @@ function diagText(message, diag) {
       return "  " + name + ": SET (" + v.length + " characters, value withheld)";
     };
     out.push(line("AUTOTRAIN_URL"));
-    out.push(line("AUTOTRAIN_MODEL_ID"));
     out.push(line("AUTOTRAIN_API_KEY"));
     if (env.node) out.push("  node: " + env.node);
     out.push("");

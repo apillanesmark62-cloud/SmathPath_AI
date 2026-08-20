@@ -149,7 +149,7 @@ trace: for every attempt, the URL, the request headers, the exact JSON body
 sent, the HTTP status and status text, every response header, and the response
 body as text *before* any JSON parsing, plus a note if it did not parse. Above
 that sits what the deployed function can see of its own configuration, so
-whether `AUTOTRAIN_MODEL_ID` actually reached the environment is a fact on the
+whether `AUTOTRAIN_URL` actually reached the environment is a fact on the
 page rather than a guess. **Copy** puts the whole thing on the clipboard.
 
 The same trace goes to the Netlify function log, tagged `[classify] REQUEST`
@@ -165,25 +165,20 @@ A reply that is HTML rather than JSON is named as such, with its `<title>` —
 the endpoint sits behind Cloudflare, and an edge block is an HTML page, so
 quoting 300 characters of markup would read as noise.
 
-If the complaint is about a missing model, set `AUTOTRAIN_MODEL_ID` to the
-`model_id` from your Testing Console response. Where that id belongs in the
-request is not documented — the working sample does not carry it, yet the reply
-names one — so `classify.mjs` tries each plausible position in turn (top level
-beside `data`, inside the row, then as a `?model_id=` query parameter, then the
-plain sample shape) and keeps whichever the endpoint accepts for the life of
-the instance. Only a rejection that is about the body (400, 404, 415, 422)
-moves it on to the next shape; 401, 403, 429 and 5xx stop it at once, because a
-different shape cannot fix those.
+The request body is never varied. The Testing Console's body is known to work,
+so `classify.mjs` sends exactly that and nothing else. The only retry is a
+trailing slash on a 404, because a FastAPI app with `redirect_slashes` off
+answers a missing slash with a flat 404 instead of a redirect.
 
-To find the accepted shape without deploying, from a machine that can reach the
-endpoint:
+To hunt for the right path from a machine that can reach the endpoint:
 
 ```bash
-npm run probe:autotrain -- --model-id=<your model id>
+npm run probe:autotrain
 ```
 
-It posts the real request in each shape and prints the status, headers and body
-of every attempt.
+It asks the server for its OpenAPI route list, then posts the real body to the
+paths a prediction endpoint usually occupies, printing status, headers and body
+for each.
 
 **⚠ Activity categories are only partly confirmed.** `preferred_activity` is a
 snake_case category. `public_speaking` is verified — it is the value in the
@@ -237,10 +232,10 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
 
    | `AUTOTRAIN_URL` | the prediction endpoint — **required**, see below |
 
-   The built-in default returns 404, so the classifier needs `AUTOTRAIN_URL`
-   pointed at the path your Testing Console actually posts to. `AUTOTRAIN_API_KEY`
-   and `AUTOTRAIN_MODEL_ID` are set only if that endpoint asks for them. See
-   **Strand classifier** above.
+   The built-in fallback returns 404, so the classifier needs `AUTOTRAIN_URL`
+   pointed at the path your Testing Console actually posts to. Set
+   `AUTOTRAIN_API_KEY` only if that endpoint asks for one. See **Strand
+   classifier** above.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 
