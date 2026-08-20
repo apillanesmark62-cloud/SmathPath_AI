@@ -811,14 +811,17 @@ function diagText(message, diag) {
     const line = (name) => {
       const v = env[name];
       if (!v) return "  " + name + ": unknown";
-      if (!v.set) return "  " + name + ": NOT SET" + (v.using ? " — using " + v.using : "");
+      if (!v.set) return "  " + name + ": NOT SET" + (v.using ? " — " + v.using : "");
       if (typeof v.value === "string") return "  " + name + ": SET = " + v.value;
-      return "  " + name + ": SET";
+      return "  " + name + ": SET" + (v.note ? " — " + v.note : v.as ? " (as " + v.as + ")" : "");
     };
     out.push(line("AUTOTRAIN_URL"));
-    out.push(line("AUTOTRAIN_API_KEY"));
-    out.push(line("AUTOTRAIN_REFRESH_TOKEN"));
+    out.push(line("AUTOTRAIN_EMAIL"));
+    out.push(line("AUTOTRAIN_PASSWORD"));
     out.push(line("AUTOTRAIN_FIREBASE_API_KEY"));
+    /* Only worth a line when configured — neither is required any more. */
+    if (env.AUTOTRAIN_REFRESH_TOKEN) out.push(line("AUTOTRAIN_REFRESH_TOKEN"));
+    if (env.AUTOTRAIN_API_KEY) out.push(line("AUTOTRAIN_API_KEY"));
 
     /* The token itself is never sent here — only whether one was attached and
        how much life it had left, which is what a 401 turns on. */
@@ -843,7 +846,7 @@ function diagText(message, diag) {
           (env.visible_variables.length ? env.visible_variables.join(", ") : "(none)")
       );
     }
-    if (env.refresh_error) out.push("  token refresh failed: " + env.refresh_error);
+    if (env.credential_error) out.push("  credential problem: " + env.credential_error);
     if (env.node) out.push("  node: " + env.node);
     out.push("");
   }

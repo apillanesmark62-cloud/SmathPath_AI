@@ -133,66 +133,67 @@ expect to have to change: copy the fresh Request URL from the console and set
 `?access=dashboard` is carried through verbatim because the console sends it.
 
 **The endpoint requires authentication.** Without a bearer token it answers
-`401 Dashboard authentication is required.` The console sends a **Firebase ID
-token** for the project that hosts AutoTrain — and those last exactly one
-hour, which shapes everything below.
+`401 Dashboard authentication is required.` The dashboard sends a **Firebase
+ID token** for the project hosting AutoTrain, and those last exactly one hour.
 
-There are two ways to supply one. The token is read in the serverless function
-either way and never reaches the browser.
+**So the function signs in for itself.** The AutoTrain account is a Firebase
+email/password account — the dashboard's own ID token carries
+`sign_in_provider: "password"` — and Firebase documents a REST endpoint for
+that:
 
-| Route | Variables | Lasts |
+```
+POST identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=<web api key>
+{ "email": …, "password": …, "returnSecureToken": true }
+-> { "idToken": …, "refreshToken": …, "expiresIn": "3600" }
+```
+
+That makes the configurable credential the **AutoTrain login itself** —
+something a person knows — rather than a `refreshToken` that only exists
+inside a signed-in browser's IndexedDB and has to be dug out with DevTools.
+Sign-in also returns a refresh token, so the function renews from that and
+signs in again only when renewing stops working: one sign-in covers many hours
+of predictions.
+
+| Variable | Required | What it is |
 | --- | --- | --- |
-| **A** — supply the credential | `AUTOTRAIN_API_KEY` | as long as the credential does |
-| **B** — mint tokens | `AUTOTRAIN_REFRESH_TOKEN` + `AUTOTRAIN_FIREBASE_API_KEY` | indefinitely |
+| `AUTOTRAIN_EMAIL` | **yes** | the address you log in to AutoTrain with |
+| `AUTOTRAIN_PASSWORD` | **yes** | that account's password |
+| `AUTOTRAIN_FIREBASE_API_KEY` | no | the project's public web API key |
+| `AUTOTRAIN_REFRESH_TOKEN` | no | still honoured; sign-in does not need it |
 
-**Route A.** Set `AUTOTRAIN_API_KEY` to the `Authorization` header value from
-the Testing Console's successful request. Pasting the whole thing, `Bearer
-eyJ…`, is fine — the prefix is stripped.
+**The API key is optional because it is public.** Firebase documents web API
+keys as identifiers rather than secrets — every visitor to the dashboard
+already holds one. When the variable is unset, `classify.mjs` reads it from
+the AutoTrain app's own published bundle and caches it, so a deployment needs
+only the login. Set it to skip that lookup, or if the app changes shape and
+the lookup stops finding it. Either spelling works:
+`AUTOTRAIN_FIREBASE_API_KEY` or `AUTOTRAIN_FIREBASE_APIKEY`.
 
-How long that lasts depends on what the header holds. A long value beginning
-`eyJ` is a Firebase ID token, and those expire **one hour** after they are
-issued: the site works, then answers 401 for everyone until the variable is
-replaced. If AutoTrain also issues a non-expiring API key, that is the value
-to use here instead, and Route B is unnecessary.
+**Why not a service account?** AutoTrain runs in somebody else's Firebase
+project, so the Admin SDK and service-account credentials are not available to
+us — those belong to whoever operates AutoTrain. `signInWithPassword` is the
+supported server-side path for a *user* of an app, and it is exactly what the
+dashboard's login form does.
 
-**Route B** is the one to deploy. A Firebase refresh token does not expire
-unless revoked, so `classify.mjs` exchanges it for a fresh ID token at
-`securetoken.googleapis.com` whenever the cached one is within five minutes of
-running out, and caches the result for the life of the instance — many
-predictions, one exchange.
+**`AUTOTRAIN_API_KEY` and `AUTOTRAIN_AUTH` are gone.** They held an ID token
+pasted out of the browser, which expired an hour later. Delete them from
+Netlify; if either is still set, the diagnostics say so rather than leaving
+you wondering why it changed nothing.
 
-If AutoTrain rejects a token the function believed was still live — revoked,
-rotated, or the clocks disagree — it discards the cached token, mints another
-and retries the request once. Only once, and only for a token that came from
-refreshing: retrying a pasted one would repeat the same 401. Find the two values in the Testing Console with
-DevTools open:
+`AUTOTRAIN_PASSWORD` is a real secret — it logs in as you. It belongs in
+Netlify's environment, never in the repository. Nothing about it reaches the
+browser: the client posts to `/api/classify` on your own origin, and the
+diagnostics report only whether each variable is set, never a value.
 
-- `AUTOTRAIN_REFRESH_TOKEN` — Application → IndexedDB → `firebaseLocalStorage`
-  → your user record → `stsTokenManager` → `refreshToken`
-- `AUTOTRAIN_FIREBASE_API_KEY` — the project's web API key, visible as the
-  `?key=` parameter on any request to `identitytoolkit.googleapis.com` or
-  `securetoken.googleapis.com`
+When a 401 does come back, the panel names the cause — a rejected login, a
+wrong API key, a project with password sign-in disabled — quoting Google's own
+error. If AutoTrain rejects a token the function believed was live (revoked,
+rotated, or the clocks disagree), it discards the cached token, gets another
+and retries once.
 
-Either spelling of the key works — `AUTOTRAIN_FIREBASE_API_KEY` or
-`AUTOTRAIN_FIREBASE_APIKEY`. Both are natural to type and a mismatch costs a
-redeploy to discover, so the function accepts the pair and the diagnostics say
-which one it found.
-
-**Both or neither.** Setting one without the other used to fail silently and
-surface as a 401 that blamed something else; it now says which half is
-missing. Once they are in place, delete `AUTOTRAIN_API_KEY` — refreshing takes
-precedence over it, so a stale token there is harmless but misleading.
-
-Both are secrets: they authenticate as your AutoTrain account. They belong in
-Netlify's environment, never in the repository.
-
-If a 401 comes back anyway, the diagnostics panel says whether a token was
-attached, where it came from, and when it expires — an expired one is named as
-such, with how long ago it lapsed. The token itself is never shown.
-
-`AUTOTRAIN_TOKEN_ENDPOINT` overrides Google's token service, which exists so
-the refresh path can be tested against a stand-in. `AUTOTRAIN_AUTH` is
-accepted as an alias for `AUTOTRAIN_API_KEY`.
+`AUTOTRAIN_TOKEN_ENDPOINT` and `AUTOTRAIN_SIGNIN_ENDPOINT` override Google's
+two auth hosts, and `AUTOTRAIN_APP_URL` the page the API key is read from, so
+all three flows can be exercised against a stand-in.
 
 **When AutoTrain refuses the request.** Nothing is summarised away. The error
 line is AutoTrain's own words — `AutoTrain returned 400: Missing required
@@ -207,11 +208,11 @@ page rather than a guess. **Copy** puts the whole thing on the clipboard.
 The same trace goes to the Netlify function log, tagged `[classify] REQUEST`
 and `[classify] RESPONSE`.
 
-`AUTOTRAIN_API_KEY` is the one thing never echoed — the trace reports whether
-it is set and how long it is, and the header shows as `Bearer <redacted>`. The
-model id is not a credential (AutoTrain returns it in its own replies), so it
-is shown in full, which is the only way to confirm the value the deployment
-actually holds.
+Credentials are the one thing never echoed — the trace reports only whether
+each is set, and the header shows as `Bearer <redacted>`. The bearer token is
+described by its expiry rather than its value. The URL is not a credential
+(AutoTrain returns the job id in its own replies), so it is shown in full,
+which is the only way to confirm the value the deployment actually holds.
 
 A reply that is HTML rather than JSON is named as such, with its `<title>` —
 the endpoint sits behind Cloudflare, and an edge block is an HTML page, so
@@ -281,14 +282,13 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | Key | Value |
    | --- | --- |
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
-   | `AUTOTRAIN_API_KEY` | the `Authorization` header value from the Testing Console |
+   | `AUTOTRAIN_EMAIL` | the address you log in to AutoTrain with |
+   | `AUTOTRAIN_PASSWORD` | that account's password |
 
-   The classifier's endpoint is compiled into `classify.mjs`, but it needs a
-   credential — `AUTOTRAIN_API_KEY` is what stops it answering 401. If that
-   value is a Firebase ID token it expires hourly; use
-   `AUTOTRAIN_REFRESH_TOKEN` and `AUTOTRAIN_FIREBASE_API_KEY` instead to have
-   the function renew it. Set `AUTOTRAIN_URL` as well when the model is
-   retrained and the job id changes. See **Strand classifier** above.
+   The classifier's endpoint is compiled into `classify.mjs`; those two are
+   what stop it answering 401, and the function signs in and renews its own
+   token from there. Set `AUTOTRAIN_URL` as well when the model is retrained
+   and the job id changes. See **Strand classifier** above.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 
@@ -315,10 +315,10 @@ To confirm after a build, search `dist/` — there should be no key and no
 npm run build && grep -ri "sk-ant\|api.anthropic.com\|Bearer " dist/ ; echo "exit $? (1 = clean)"
 ```
 
-The string `AUTOTRAIN_API_KEY` *does* appear in the bundle, and that is correct:
-the diagnostics panel labels the row that reports whether the key is set. It is
-the variable's name, never its value — the value only ever exists in the
-serverless function's environment.
+Variable *names* such as `AUTOTRAIN_EMAIL` do appear in the bundle, and that is
+correct: the diagnostics panel labels the rows that report whether each is set.
+Names, never values — the values only ever exist in the serverless function's
+environment.
 
 The endpoint also pins the model server-side, validates the request shape, caps
 message count and length, and applies a best-effort per-IP rate limit. That

@@ -14,17 +14,22 @@
                         job id changes, i.e. when the model is retrained and
                         AutoTrain issues a new one.
      The endpoint answers "401 Dashboard authentication is required" without a
-     bearer token. The Testing Console sends a Firebase ID token for the
-     project that hosts AutoTrain, and those last exactly one hour, so there
-     are two ways to supply one — see the credentials section below.
+     bearer token, so the function signs in for itself — see the credentials
+     section below.
 
-     AUTOTRAIN_API_KEY            the credential from the Testing Console's
-                                  Authorization header, sent as a bearer
-                                  token. Simple, and it stops working an hour
-                                  after the token was minted.
-     AUTOTRAIN_AUTH               alias for AUTOTRAIN_API_KEY.
-     AUTOTRAIN_REFRESH_TOKEN      \ together these mint a fresh ID token on
-     AUTOTRAIN_FIREBASE_API_KEY   / demand and keep working indefinitely.
+     AUTOTRAIN_EMAIL     \ REQUIRED. The AutoTrain login. Nothing else needs
+     AUTOTRAIN_PASSWORD  / configuring for authentication to work.
+
+     AUTOTRAIN_FIREBASE_API_KEY  optional — the project's public web API key.
+                        Read from the AutoTrain app when unset. Set it to skip
+                        that lookup or if the app's layout ever changes.
+     AUTOTRAIN_REFRESH_TOKEN     optional — a Firebase refresh token, still
+                        honoured so an older deployment keeps working. Sign-in
+                        does not need it.
+
+     AUTOTRAIN_API_KEY and AUTOTRAIN_AUTH are gone. They held a pasted ID
+     token, which expired an hour after it was copied; the diagnostics say so
+     if one is still set.
    ========================================================== */
 
 /* The prediction endpoint, taken from the Testing Console's own network
@@ -84,26 +89,42 @@ export const ACTIVITIES = [
 /* ==========================================================
    Credentials
 
-   The prediction endpoint requires the same bearer token the AutoTrain
-   dashboard sends: a Firebase ID token, issued by Google's secure token
-   service for the project that hosts AutoTrain.
+   AutoTrain's prediction endpoint wants the bearer token its own dashboard
+   sends: a Firebase ID token for the project hosting AutoTrain. Those live
+   one hour, so the only real question is how the function gets a fresh one
+   with nobody in the loop.
 
-   Those tokens live for one hour. A token pasted into an environment
-   variable therefore fixes the site until it expires and then breaks it for
-   everyone, which is why the refresh path exists: a Firebase refresh token
-   does not expire unless it is revoked, and exchanging one for a fresh ID
-   token is a documented, unauthenticated-by-design call that needs only the
-   project's public web API key.
+   It signs in. The account is a Firebase email/password account — the ID
+   token from the dashboard carries sign_in_provider "password" — and Firebase
+   documents a REST endpoint for precisely that:
 
-   Whichever route supplies the token, it is read here, in the serverless
-   function, and never sent to the browser.
+     POST identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=…
+     { "email": …, "password": …, "returnSecureToken": true }
+     -> { "idToken": …, "refreshToken": …, "expiresIn": "3600" }
+
+   That makes the configurable credential the AutoTrain login itself, which a
+   person knows without a browser, rather than a refreshToken that only exists
+   inside a signed-in browser's IndexedDB. Sign-in also returns a refresh
+   token, so the function renews from that until it stops working and signs in
+   again only then: one sign-in covers many hours of predictions.
+
+   AutoTrain is somebody else's Firebase project, so there is no service
+   account or Admin SDK route available to us. signInWithPassword is the
+   supported server-side path for a user of an app, and it is what the
+   dashboard's own login form does.
+
+   Every value is read here, in the serverless function, and none of it
+   reaches the browser.
    ========================================================== */
 
-/* Google's secure token service. Overridable by AUTOTRAIN_TOKEN_ENDPOINT so
-   the refresh path can be exercised against a stand-in without reaching out
-   to Google, and so a move on Google's side is a config change. */
+const SIGNIN_ENDPOINT = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword";
 const REFRESH_ENDPOINT = "https://securetoken.googleapis.com/v1/token";
 
+/* Overridable so both flows can be exercised against a stand-in, and so a
+   move on Google's side is a config change rather than a deploy. */
+function signInEndpoint() {
+  return process.env.AUTOTRAIN_SIGNIN_ENDPOINT || SIGNIN_ENDPOINT;
+}
 function tokenEndpoint() {
   return process.env.AUTOTRAIN_TOKEN_ENDPOINT || REFRESH_ENDPOINT;
 }
@@ -111,8 +132,9 @@ function tokenEndpoint() {
 /* Renew this long before expiry so a request in flight cannot age out. */
 const RENEW_MARGIN_MS = 5 * 60_000;
 
-/* Held for the life of the instance: one exchange serves many predictions. */
-let cachedToken = null;
+/* Held for the life of the instance: one sign-in serves many predictions. */
+let cachedToken = null;   /* { token, expiresAt, refreshToken } */
+let cachedApiKey = null;  /* Firebase web API key, once discovered */
 
 /* A JWT's expiry, read from its payload without verifying the signature —
    this is our own token and we only want to know when to replace it. */
@@ -127,25 +149,29 @@ function tokenExpiry(jwt) {
   }
 }
 
-/* The configured credential and which variable held it. Pasting the whole
-   header value, "Bearer eyJ...", is the obvious mistake to make and costs
-   nothing to absorb. */
-function staticToken() {
-  for (const name of ["AUTOTRAIN_API_KEY", "AUTOTRAIN_AUTH"]) {
-    const raw = process.env[name];
-    if (typeof raw === "string" && raw.trim()) {
-      return { token: raw.trim().replace(/^Bearer\s+/i, ""), source: name };
-    }
+/* Google's errors put the useful sentence in error.message and a stable code
+   in error.details[].reason. Take both when they are both there. */
+function googleError(status, text) {
+  try {
+    const j = JSON.parse(text);
+    const e = j.error || {};
+    const reason = Array.isArray(e.details)
+      ? (e.details.find((d) => d && d.reason) || {}).reason
+      : null;
+    const message = e.message || JSON.stringify(e).slice(0, 200);
+    return reason && reason !== message ? message + " (" + reason + ")" : message;
+  } catch (e) {
+    return String(text || "").slice(0, 200) || "HTTP " + status;
   }
-  return { token: "", source: null };
 }
 
 /* The Firebase web API key, under either spelling. API_KEY and APIKEY are
    both natural things to type, and a mismatch here costs a redeploy to find
    out about, so accept the pair rather than adjudicate between them. */
 const FIREBASE_KEY_NAMES = ["AUTOTRAIN_FIREBASE_API_KEY", "AUTOTRAIN_FIREBASE_APIKEY"];
+const KEY_PATTERN = /AIza[0-9A-Za-z_-]{35}/;
 
-function firebaseApiKey() {
+function configuredApiKey() {
   for (const name of FIREBASE_KEY_NAMES) {
     const v = process.env[name];
     if (typeof v === "string" && v.trim()) return { key: v.trim(), source: name };
@@ -153,72 +179,181 @@ function firebaseApiKey() {
   return { key: "", source: null };
 }
 
-async function refreshedToken() {
-  const refresh = process.env.AUTOTRAIN_REFRESH_TOKEN;
-  const { key: apiKey } = firebaseApiKey();
+/* A Firebase web API key is public by design — Google documents it as an
+   identifier rather than a secret, and every visitor to the dashboard already
+   holds it. It is nonetheless awkward to obtain without a browser, so when it
+   is not configured, read it from the dashboard's own published bundle.
 
-  /* Half-configured is the likeliest way to set this up wrong, and staying
-     quiet about it turns into a 401 that blames something else. Name the
-     missing half instead. */
-  if (refresh && !apiKey) {
-    throw new Error(
-      "AUTOTRAIN_REFRESH_TOKEN is set but no Firebase API key is — add " +
-        FIREBASE_KEY_NAMES.join(" or ") + " (either spelling works)"
-    );
-  }
-  if (apiKey && !refresh) {
-    throw new Error("a Firebase API key is set but AUTOTRAIN_REFRESH_TOKEN is not — both are needed");
-  }
-  if (!refresh) return null;
+   A convenience, not the contract: set AUTOTRAIN_FIREBASE_API_KEY and none of
+   this runs. Bounded to a handful of scripts so a redesign of that site
+   cannot turn into an unbounded crawl. */
+async function discoverApiKey() {
+  if (cachedApiKey) return cachedApiKey;
 
-  if (cachedToken && cachedToken.expiresAt - Date.now() > RENEW_MARGIN_MS) {
-    return cachedToken.token;
+  const appUrl = process.env.AUTOTRAIN_APP_URL || "https://autotrain.app/";
+  const grab = async (url) => {
+    const res = await fetch(url, { headers: { Accept: "text/html,application/javascript,*/*" } });
+    if (!res.ok) throw new Error("HTTP " + res.status + " from " + url);
+    return await res.text();
+  };
+
+  const html = await grab(appUrl);
+  const inline = html.match(KEY_PATTERN);
+  if (inline) {
+    cachedApiKey = inline[0];
+    console.log("[classify] read the Firebase API key from " + appUrl);
+    return cachedApiKey;
   }
 
-  const res = await fetch(tokenEndpoint() + "?key=" + encodeURIComponent(apiKey), {
+  const srcs = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)]
+    .map((m) => {
+      try {
+        return new URL(m[1], appUrl).href;
+      } catch (e) {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 6);
+
+  for (const src of srcs) {
+    let js;
+    try {
+      js = await grab(src);
+    } catch (e) {
+      continue;
+    }
+    const found = js.match(KEY_PATTERN);
+    if (found) {
+      cachedApiKey = found[0];
+      console.log("[classify] read the Firebase API key from " + src);
+      return cachedApiKey;
+    }
+  }
+
+  throw new Error(
+    "could not read the Firebase API key from " + appUrl + " — set " + FIREBASE_KEY_NAMES[0] + " instead"
+  );
+}
+
+async function firebaseApiKey() {
+  const configured = configuredApiKey();
+  if (configured.key) return configured;
+  return { key: await discoverApiKey(), source: "discovered from the AutoTrain app" };
+}
+
+async function signIn(apiKey) {
+  const email = process.env.AUTOTRAIN_EMAIL;
+  const password = process.env.AUTOTRAIN_PASSWORD;
+  if (!email || !password) return null;
+
+  const res = await fetch(signInEndpoint() + "?key=" + encodeURIComponent(apiKey), {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh }).toString(),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, returnSecureToken: true }),
   });
   const text = await res.text();
 
-  let data = null;
-  try {
-    data = JSON.parse(text);
-  } catch (e) {
-    /* reported below */
-  }
-
   if (!res.ok) {
-    const why = (data && data.error && (data.error.message || data.error)) || text.slice(0, 200);
-    throw new Error("refreshing the AutoTrain token failed (" + res.status + "): " + why);
+    throw new Error("signing in to AutoTrain failed (" + res.status + "): " + googleError(res.status, text));
   }
 
-  const token = data && (data.id_token || data.access_token);
-  if (!token) throw new Error("the token service returned no id_token");
+  const data = JSON.parse(text);
+  const token = data.idToken;
+  if (!token) throw new Error("sign-in returned no idToken");
 
-  const expiresAt =
-    tokenExpiry(token) || Date.now() + Number((data && data.expires_in) || 3600) * 1000;
-  cachedToken = { token, expiresAt };
-  console.log("[classify] minted a fresh ID token, good until " + new Date(expiresAt).toISOString());
+  const expiresAt = tokenExpiry(token) || Date.now() + Number(data.expiresIn || 3600) * 1000;
+  cachedToken = { token, expiresAt, refreshToken: data.refreshToken || null };
+  console.log("[classify] signed in as " + email + "; token good until " + new Date(expiresAt).toISOString());
   return token;
 }
 
-/* The token to send, and where it came from. Refreshing wins when it is
-   configured, because a static token is the one that goes stale. */
-async function authToken() {
-  let refreshError = null;
-  try {
-    const fresh = await refreshedToken();
-    if (fresh) return { token: fresh, source: "AUTOTRAIN_REFRESH_TOKEN" };
-  } catch (e) {
-    refreshError = e && e.message ? e.message : String(e);
-    console.error("[classify] " + refreshError);
+async function renew(apiKey, refreshToken) {
+  const res = await fetch(tokenEndpoint() + "?key=" + encodeURIComponent(apiKey), {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }).toString(),
+  });
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error("renewing the AutoTrain token failed (" + res.status + "): " + googleError(res.status, text));
   }
 
-  const fixed = staticToken();
-  if (fixed.token) return { token: fixed.token, source: fixed.source, refreshError };
-  return { token: null, source: null, refreshError };
+  const data = JSON.parse(text);
+  const token = data.id_token || data.access_token;
+  if (!token) throw new Error("the token service returned no id_token");
+
+  const expiresAt = tokenExpiry(token) || Date.now() + Number(data.expires_in || 3600) * 1000;
+  cachedToken = { token, expiresAt, refreshToken: data.refresh_token || refreshToken };
+  console.log("[classify] renewed the ID token, good until " + new Date(expiresAt).toISOString());
+  return token;
+}
+
+/* The token to send, and where it came from.
+
+   In order: a cached token still comfortably alive, then renewing from
+   whichever refresh token we hold, then a fresh sign-in. AUTOTRAIN_REFRESH_TOKEN
+   is still honoured, so a deployment already configured that way keeps
+   working — but it is no longer the only way in, and nothing requires it. */
+async function authToken() {
+  const email = process.env.AUTOTRAIN_EMAIL;
+  const password = process.env.AUTOTRAIN_PASSWORD;
+  const configuredRefresh = process.env.AUTOTRAIN_REFRESH_TOKEN;
+
+  if (!email && !password && !configuredRefresh) {
+    return { token: null, source: null, error: null };
+  }
+  if (email && !password) {
+    return { token: null, source: null, error: "AUTOTRAIN_EMAIL is set but AUTOTRAIN_PASSWORD is not" };
+  }
+  if (password && !email) {
+    return { token: null, source: null, error: "AUTOTRAIN_PASSWORD is set but AUTOTRAIN_EMAIL is not" };
+  }
+
+  if (cachedToken && cachedToken.expiresAt - Date.now() > RENEW_MARGIN_MS) {
+    return { token: cachedToken.token, source: "a cached token", error: null };
+  }
+
+  let apiKey;
+  let keySource;
+  try {
+    const found = await firebaseApiKey();
+    apiKey = found.key;
+    keySource = found.source;
+  } catch (e) {
+    return { token: null, source: null, error: e && e.message ? e.message : String(e) };
+  }
+
+  const refreshToken = (cachedToken && cachedToken.refreshToken) || configuredRefresh;
+  let renewError = null;
+
+  if (refreshToken) {
+    try {
+      return { token: await renew(apiKey, refreshToken), source: "renewed", keySource, error: null };
+    } catch (e) {
+      renewError = e && e.message ? e.message : String(e);
+      console.error("[classify] " + renewError);
+      /* A dead refresh token is exactly what signing in again fixes. */
+      cachedToken = null;
+    }
+  }
+
+  try {
+    const token = await signIn(apiKey);
+    if (token) return { token, source: "signed in", keySource, error: null };
+  } catch (e) {
+    const message = e && e.message ? e.message : String(e);
+    console.error("[classify] " + message);
+    return { token: null, source: null, keySource, error: message };
+  }
+
+  return {
+    token: null,
+    source: null,
+    keySource,
+    error: renewError || "no usable credential — set AUTOTRAIN_EMAIL and AUTOTRAIN_PASSWORD",
+  };
 }
 
 /* Describe a token for the diagnostics block without ever showing it. Its
@@ -341,52 +476,41 @@ function readStatus(status, contentType, auth) {
     return "A 422 means the path is right and the body is not — the field names or their types do not match what the model expects.";
   }
   if (status === 401 || status === 403) {
-    const fixed = staticToken();
-    const expiresAt = fixed.token ? tokenExpiry(fixed.token) : null;
+    /* A credential step that failed explains the 401 directly, and any other
+       advice would send someone to fix what is not broken. */
+    if (auth && auth.error) {
+      const why = auth.error;
+      if (/EMAIL_NOT_FOUND|INVALID_PASSWORD|INVALID_LOGIN_CREDENTIALS/i.test(why)) {
+        return "Signing in to AutoTrain was rejected: " + why + ". Check AUTOTRAIN_EMAIL and " +
+          "AUTOTRAIN_PASSWORD are the credentials you use on the AutoTrain website itself.";
+      }
+      if (/API_KEY_INVALID|API key not valid/i.test(why)) {
+        return "The Firebase API key is wrong: " + why + ". Clear AUTOTRAIN_FIREBASE_API_KEY to " +
+          "let the function read the correct one from the AutoTrain app, or set it to the " +
+          "?key= value the dashboard uses.";
+      }
+      if (/PASSWORD_LOGIN_DISABLED|OPERATION_NOT_ALLOWED/i.test(why)) {
+        return "AutoTrain's Firebase project has email/password sign-in switched off: " + why +
+          ". If your AutoTrain account signs in with Google rather than a password, this route " +
+          "cannot work and the account needs a password set on it.";
+      }
+      return "No usable credential: " + why + ".";
+    }
 
-    /* A configured refresh that failed outranks everything else: it explains
-       the 401 directly, and any other advice would send you to fix something
-       that is not broken. */
-    if (auth && auth.refreshError) {
-      return "The token could not be renewed, so the request went out with whatever credential was left: " +
-        auth.refreshError + ".";
-    }
-    if (auth && auth.source === "AUTOTRAIN_REFRESH_TOKEN") {
+    if (!process.env.AUTOTRAIN_EMAIL && !process.env.AUTOTRAIN_REFRESH_TOKEN) {
       return (
-        "A freshly minted token was sent and still refused. That points at the refresh token " +
-        "belonging to a different account or Firebase project than the model — check that " +
-        "AUTOTRAIN_FIREBASE_API_KEY is the same project's web API key, and that you were " +
-        "signed in as the model's owner when you copied the refresh token."
+        "The endpoint needs the bearer token the AutoTrain dashboard sends, and no credential " +
+        "reached this function. In Netlify, under Site configuration -> Environment variables, " +
+        "add AUTOTRAIN_EMAIL and AUTOTRAIN_PASSWORD — the login you use on AutoTrain itself — " +
+        "then redeploy. The values bind at deploy time, so saving them alone changes nothing."
       );
     }
 
-    if (!fixed.token && !process.env.AUTOTRAIN_REFRESH_TOKEN) {
-      return (
-        "The endpoint needs the same bearer token the AutoTrain dashboard sends, and no " +
-        "credential reached this function. In Netlify, under Site configuration -> " +
-        "Environment variables, add AUTOTRAIN_API_KEY with the value of the Authorization " +
-        "header from the Testing Console's successful request, then redeploy — the value is " +
-        "bound at deploy time, so saving it alone changes nothing. If you have already done " +
-        "that, compare the name against the variables listed below, and check the value is " +
-        "scoped to Functions and to the deploy context you are testing."
-      );
-    }
-    if (expiresAt && expiresAt <= Date.now()) {
-      const hours = Math.round((Date.now() - expiresAt) / 3600000);
-      const ago = hours < 1 ? "less than an hour" : hours === 1 ? "an hour" : hours + " hours";
-      return (
-        fixed.source + " holds a token that expired " + ago + " ago, and no refresh is " +
-        "configured. Firebase ID tokens last one hour, so replacing it buys another hour. To " +
-        "stop doing that, add AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY — spelled " +
-        "exactly that way — and the function will renew the token itself. Delete " +
-        fixed.source + " once they are in place."
-      );
-    }
     return (
-      "The token was sent and refused. If it was minted for a different Firebase project " +
-      "than the one hosting AutoTrain it will not be accepted — check the request headers " +
-      "in the Testing Console's Network tab against the ones listed below. Do not move the " +
-      "call into the browser to work around it; that would publish the token to every visitor."
+      "A freshly issued token was sent and still refused. That points at the account rather " +
+      "than the plumbing: AUTOTRAIN_EMAIL has to be the account that owns this model, since a " +
+      "signed-in user can only score their own jobs. Do not move the call into the browser to " +
+      "work around it; that would publish the credential to every visitor."
     );
   }
   return null;
@@ -433,23 +557,34 @@ function upstreamMessage(text, data, contentType) {
 }
 
 /* What the function can see of its own configuration, for the diagnostics
-   block. AUTOTRAIN_API_KEY is reported as present-or-absent and never echoed;
-   the model id is an identifier rather than a credential — it comes back in
-   AutoTrain's own replies — so it is shown in full, which is the only way to
-   confirm the deployment really has the value you think it has. */
+   block. Credentials are reported as present-or-absent and never echoed; the
+   URL is an identifier rather than a secret — AutoTrain returns the job id in
+   its own replies — so it is shown in full, which is the only way to confirm
+   the deployment really holds the value you think it does. */
 function envReport(auth) {
   const url = process.env.AUTOTRAIN_URL;
+  const key = configuredApiKey();
   const report = {
     AUTOTRAIN_URL: url ? { set: true, value: url } : { set: false, using: DEFAULT_URL },
-    AUTOTRAIN_API_KEY: staticToken().source === "AUTOTRAIN_API_KEY" ? { set: true } : { set: false },
+    AUTOTRAIN_EMAIL: process.env.AUTOTRAIN_EMAIL ? { set: true } : { set: false },
+    AUTOTRAIN_PASSWORD: process.env.AUTOTRAIN_PASSWORD ? { set: true } : { set: false },
     bearer_token: describeToken(auth && auth.token, auth && auth.source),
-    AUTOTRAIN_REFRESH_TOKEN: process.env.AUTOTRAIN_REFRESH_TOKEN ? { set: true } : { set: false },
-    AUTOTRAIN_FIREBASE_API_KEY: (() => {
-      const found = firebaseApiKey();
-      return found.key ? { set: true, as: found.source } : { set: false };
-    })(),
+    AUTOTRAIN_FIREBASE_API_KEY: key.key
+      ? { set: true, as: key.source }
+      : { set: false, using: cachedApiKey ? "read from the AutoTrain app" : "not needed unless discovery fails" },
     node: typeof process !== "undefined" && process.version ? process.version : "unknown",
   };
+
+  /* Optional, and only worth a line when someone has one configured. */
+  if (process.env.AUTOTRAIN_REFRESH_TOKEN) {
+    report.AUTOTRAIN_REFRESH_TOKEN = { set: true, note: "optional; sign-in does not need it" };
+  }
+
+  /* Left over from the pasted-token era. Saying so beats leaving someone to
+     wonder why setting it changed nothing. */
+  if (process.env.AUTOTRAIN_API_KEY || process.env.AUTOTRAIN_AUTH) {
+    report.AUTOTRAIN_API_KEY = { set: true, note: "NO LONGER USED — safe to delete in Netlify" };
+  }
 
   /* Which deploy this is. Netlify scopes environment variables by context, so
      a variable added to production only is genuinely absent on a deploy
@@ -473,7 +608,7 @@ function envReport(auth) {
     .filter((k) => /autotrain|firebase|anthropic/i.test(k))
     .sort();
 
-  if (auth && auth.refreshError) report.refresh_error = auth.refreshError;
+  if (auth && auth.error) report.credential_error = auth.error;
   return report;
 }
 
@@ -589,10 +724,10 @@ export async function handleClassify(body, ip = "local") {
           auth = retry;
           step.reauthenticated = true;
           res = await send();
-        } else if (retry.refreshError) {
+        } else if (retry.error) {
           auth = retry;
           step.reauthenticated = false;
-          step.reauth_error = retry.refreshError;
+          step.reauth_error = retry.error;
         }
       }
     } catch (e) {

@@ -43,6 +43,8 @@ try {
   /* no .env — flags and the shell environment still apply */
 }
 
+const EMAIL = args.email || process.env.AUTOTRAIN_EMAIL || "";
+const PASSWORD = args.password || process.env.AUTOTRAIN_PASSWORD || "";
 const REFRESH_TOKEN = args["refresh-token"] || process.env.AUTOTRAIN_REFRESH_TOKEN || "";
 const FIREBASE_KEY =
   args["firebase-key"] ||
@@ -66,6 +68,47 @@ function expiryOf(jwt) {
   }
 }
 
+/* Google's errors: the sentence lives in error.message. */
+function explain(text) {
+  try {
+    const j = JSON.parse(text);
+    return (j.error && (j.error.message || JSON.stringify(j.error))) || text.slice(0, 200);
+  } catch (e) {
+    return String(text || "").slice(0, 200);
+  }
+}
+
+/* The web API key is public and lives in the AutoTrain app's own bundle, so
+   it can be read rather than hunted for in DevTools. */
+async function discoverKey() {
+  if (FIREBASE_KEY) return FIREBASE_KEY;
+  const appUrl = process.env.AUTOTRAIN_APP_URL || "https://autotrain.app/";
+  const pattern = /AIza[0-9A-Za-z_-]{35}/;
+  try {
+    const html = await (await fetch(appUrl)).text();
+    let found = html.match(pattern);
+    if (!found) {
+      const srcs = [...html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)]
+        .map((m) => new URL(m[1], appUrl).href)
+        .slice(0, 6);
+      for (const src of srcs) {
+        const js = await (await fetch(src)).text();
+        found = js.match(pattern);
+        if (found) break;
+      }
+    }
+    if (found) {
+      console.log("  firebase key: read from the AutoTrain app (no variable needed)");
+      return found[0];
+    }
+  } catch (e) {
+    /* reported below */
+  }
+  console.log("  ❌ could not read the Firebase API key from " + appUrl);
+  console.log("     Set AUTOTRAIN_FIREBASE_API_KEY, or pass --firebase-key=AIza…");
+  return "";
+}
+
 /* ---- 0. check the credentials before anything else ---------------------- */
 
 async function checkCredentials() {
@@ -73,30 +116,69 @@ async function checkCredentials() {
   console.log("0. Credentials");
   console.log(line);
 
-  if (API_KEY) {
-    const exp = expiryOf(API_KEY);
-    if (exp === null) {
-      console.log("  AUTOTRAIN_API_KEY: set, not a JWT — assuming it does not expire");
-    } else if (exp <= Date.now()) {
-      const mins = Math.round((Date.now() - exp) / 60000);
-      console.log("  AUTOTRAIN_API_KEY: EXPIRED " + mins + " minutes ago (" + new Date(exp).toISOString() + ")");
-    } else {
-      console.log("  AUTOTRAIN_API_KEY: valid for another " +
-        Math.round((exp - Date.now()) / 60000) + " minutes");
-    }
-  } else {
-    console.log("  AUTOTRAIN_API_KEY: not set");
+  if (process.env.AUTOTRAIN_API_KEY || process.env.AUTOTRAIN_AUTH) {
+    console.log("  AUTOTRAIN_API_KEY: set, but NO LONGER USED — safe to delete in Netlify");
   }
 
-  if (!REFRESH_TOKEN && !FIREBASE_KEY) {
-    console.log("  refresh: not configured (AUTOTRAIN_REFRESH_TOKEN + a Firebase key)");
+  /* Signing in is the supported route, so try it first. */
+  if (EMAIL && PASSWORD) {
+    const key = FIREBASE_KEY || (await discoverKey());
+    if (!key) return;
+
+    console.log("  signing in as " + EMAIL + "…");
+    const endpoint =
+      process.env.AUTOTRAIN_SIGNIN_ENDPOINT ||
+      "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword";
+    let res, text;
+    try {
+      res = await fetch(endpoint + "?key=" + encodeURIComponent(key), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: EMAIL, password: PASSWORD, returnSecureToken: true }),
+      });
+      text = await res.text();
+    } catch (e) {
+      console.log("  ❌ could not reach Firebase: " + (e && e.message ? e.message : e));
+      return;
+    }
+
+    if (!res.ok) {
+      const why = explain(text);
+      console.log("  ❌ HTTP " + res.status + " — " + why);
+      if (/EMAIL_NOT_FOUND|INVALID_PASSWORD|INVALID_LOGIN_CREDENTIALS/i.test(why)) {
+        console.log("     Those are not the credentials AutoTrain knows. Check them by logging in");
+        console.log("     to the AutoTrain website with exactly this email and password.");
+      } else if (/API_KEY_INVALID|API key not valid/i.test(why)) {
+        console.log("     The Firebase API key is wrong. Leave it unset to have it read from the app.");
+      } else if (/PASSWORD_LOGIN_DISABLED|OPERATION_NOT_ALLOWED/i.test(why)) {
+        console.log("     This account cannot sign in with a password — if you use 'Sign in with");
+        console.log("     Google' on AutoTrain, set a password on the account first.");
+      }
+      return;
+    }
+
+    const data = JSON.parse(text);
+    const exp = expiryOf(data.idToken);
+    console.log("  ✅ signed in" + (exp ? "; token good until " + new Date(exp).toISOString() : ""));
+    console.log("     AUTOTRAIN_EMAIL and AUTOTRAIN_PASSWORD are correct. Set them in Netlify and");
+    console.log("     the classifier will sign in and renew for itself.");
+    API_KEY = data.idToken;
     return;
   }
-  if (!REFRESH_TOKEN || !FIREBASE_KEY) {
-    console.log("  refresh: HALF CONFIGURED — " +
-      (REFRESH_TOKEN ? "the Firebase API key is missing" : "AUTOTRAIN_REFRESH_TOKEN is missing"));
-    console.log("           both are needed; neither is optional");
+
+  if (EMAIL || PASSWORD) {
+    console.log("  ❌ " + (EMAIL ? "AUTOTRAIN_PASSWORD" : "AUTOTRAIN_EMAIL") + " is missing — both are needed");
     return;
+  }
+
+  if (!REFRESH_TOKEN) {
+    console.log("  no login configured. Set AUTOTRAIN_EMAIL and AUTOTRAIN_PASSWORD, or pass");
+    console.log("  --email=… --password=… to check them before putting them in Netlify.");
+    return;
+  }
+  if (!FIREBASE_KEY) {
+    const found = await discoverKey();
+    if (!found) return;
   }
 
   console.log("  refresh: exchanging the refresh token for a fresh ID token…");
