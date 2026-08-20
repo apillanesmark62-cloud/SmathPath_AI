@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "probe:autotrain": "node scripts/probe-autotrain.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

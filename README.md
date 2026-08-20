@@ -119,6 +119,31 @@ classifier runs with nothing set. `AUTOTRAIN_URL` overrides the endpoint, and
 `AUTOTRAIN_API_KEY` — if the deployment ever requires one — is sent as
 `Authorization: Bearer <key>` from the server side only.
 
+**When AutoTrain refuses the request.** The UI shows the endpoint's own words
+under the error — `AutoTrain returned 400. model_id is required`, say — and the
+Netlify function log carries the full outgoing body and the verbatim reply.
+Read those first; they say what is wrong far more reliably than guessing.
+
+If the complaint is about a missing model, set `AUTOTRAIN_MODEL_ID` to the
+`model_id` from your Testing Console response. Where that id belongs in the
+request is not documented — the working sample does not carry it, yet the reply
+names one — so `classify.mjs` tries each plausible position in turn (top level
+beside `data`, inside the row, then as a `?model_id=` query parameter, then the
+plain sample shape) and keeps whichever the endpoint accepts for the life of
+the instance. Only a rejection that is about the body (400, 404, 415, 422)
+moves it on to the next shape; 401, 403, 429 and 5xx stop it at once, because a
+different shape cannot fix those.
+
+To find the accepted shape without deploying, from a machine that can reach the
+endpoint:
+
+```bash
+npm run probe:autotrain -- --model-id=<your model id>
+```
+
+It posts the real request in each shape and prints the status, headers and body
+of every attempt.
+
 **⚠ Activity categories are only partly confirmed.** `preferred_activity` is a
 snake_case category. `public_speaking` is verified — it is the value in the
 working sample. The other six follow the same convention but have **not** been
@@ -170,8 +195,9 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
 
    The classifier needs no variables — the AutoTrain endpoint is the default in
-   `classify.mjs` and the request carries no auth. Set `AUTOTRAIN_URL` or
-   `AUTOTRAIN_API_KEY` only if that changes.
+   `classify.mjs` and the request carries no auth. Set `AUTOTRAIN_URL`,
+   `AUTOTRAIN_API_KEY` or `AUTOTRAIN_MODEL_ID` only if that changes; see
+   **Strand classifier** above.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 

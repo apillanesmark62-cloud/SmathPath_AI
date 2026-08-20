@@ -794,6 +794,7 @@ function matchStrandOption(label) {
 function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfile, save }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [detail, setDetail] = useState("");
   const [open, setOpen] = useState(false);
 
   /* Work saved before the options carried model values holds prose like
@@ -815,6 +816,7 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
     }
     setBusy(true);
     setError("");
+    setDetail("");
     try {
       const res = await fetch("/api/classify", {
         method: "POST",
@@ -823,6 +825,14 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
+        /* Carry the upstream status and message through so the real cause is
+           readable here rather than only in the serverless log. */
+        if (data && (data.detail || data.upstream_status)) {
+          setDetail(
+            (data.upstream_status ? "AutoTrain returned " + data.upstream_status + ". " : "") +
+              (data.detail || "")
+          );
+        }
         throw new Error((data && data.error) || "status " + res.status);
       }
       setResult(data);
@@ -893,6 +903,7 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
           </Field>
 
           <Notice kind="error" onRetry={error ? submit : null}>{error}</Notice>
+          {detail ? <p className="sp-detail">{detail}</p> : null}
 
           <div className="sp-actions">
             <button className="sp-btn sp-btn-primary" onClick={submit} disabled={busy || !answered}>
@@ -2208,6 +2219,10 @@ function Styles() {
 .sp-quiz-ranked{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
 .sp-quiz-ranked li{display:grid;grid-template-columns:minmax(80px,auto) 1fr auto;align-items:center;gap:10px}
 .sp-quiz-rlabel{font-size:13px;font-weight:600}
+/* the upstream's own words, for debugging a failing prediction */
+.sp-detail{font-family:var(--mono);font-size:11.5px;line-height:1.5;color:var(--ink-soft);
+  background:var(--chip);border:1px solid var(--line);border-radius:3px;
+  padding:9px 11px;margin:-4px 0 12px;word-break:break-word}
 /* the compare strip pins its bar to column 1 on narrow screens; the ranked
    list here is a three-column row at every width, so opt out of that. */
 .sp-quiz-ranked .sp-compare-track{grid-column:auto}

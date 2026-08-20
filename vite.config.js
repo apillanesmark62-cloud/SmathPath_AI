@@ -74,7 +74,7 @@ export default defineConfig(({ mode }) => {
      handlers. The third argument is "" so unprefixed variables are read too;
      nothing here is passed to the client bundle. */
   const env = loadEnv(mode, process.cwd(), "");
-  for (const key of ["ANTHROPIC_API_KEY", "AUTOTRAIN_URL", "AUTOTRAIN_API_KEY"]) {
+  for (const key of ["ANTHROPIC_API_KEY", "AUTOTRAIN_URL", "AUTOTRAIN_API_KEY", "AUTOTRAIN_MODEL_ID"]) {
     if (!process.env[key] && env[key]) process.env[key] = env[key];
   }
 
