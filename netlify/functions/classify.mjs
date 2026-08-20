@@ -1,26 +1,25 @@
 /* ==========================================================
    SmartPath — strand classifier endpoint
 
-   Calls the AutoTrain-trained model over the Hugging Face REST API.
-   The browser posts the eight questionnaire answers here; this function
-   adds the token and talks to the model, so the token stays server-side.
+   Calls the AutoTrain Decision Tree model. The browser posts the eight
+   questionnaire answers here; this function forwards them to AutoTrain and
+   normalises the answer, so no credential ever reaches the browser and the
+   request is not subject to the model host's CORS policy.
+
+   Request and response shapes below match the working sample from the
+   AutoTrain Testing Console verbatim — see README.
 
    Environment variables:
-     HF_CLASSIFIER_URL     required — the model's inference URL, either
-                           https://api-inference.huggingface.co/models/<user>/<model>
-                           or a dedicated endpoint
-                           https://<id>.<region>.aws.endpoints.huggingface.cloud
-     HF_API_TOKEN          required — a Hugging Face access token (hf_...)
-     HF_CLASSIFIER_FORMAT  optional — "tabular" (default) or "text".
-                           AutoTrain tabular models take a column/row payload;
-                           text-classification models take a sentence. Set this
-                           to match how the model was trained.
-
-   Served at /api/classify via the redirect in netlify.toml, and by the dev
-   middleware in vite.config.js when running `npm run dev`.
+     AUTOTRAIN_URL      optional — defaults to the project's endpoint below.
+     AUTOTRAIN_API_KEY  optional — sent as "Authorization: Bearer <key>" when
+                        set. The working sample sends no auth header, so this
+                        is left unset unless the deployment starts requiring
+                        one.
    ========================================================== */
 
-/* The eight features, in the order the model expects its columns. */
+const DEFAULT_URL = "https://api.autotrain.app/api/autotrain";
+
+/* The model's feature_columns, in the order AutoTrain reports them. */
 export const FEATURES = [
   "math_interest",
   "science_interest",
@@ -32,23 +31,30 @@ export const FEATURES = [
   "preferred_activity",
 ];
 
-/* The seven ratings are 1-5; preferred_activity is a category. */
+/* The seven ratings are 1-5 integers; preferred_activity is a category. */
 const RATINGS = FEATURES.slice(0, 7);
 const RATING_MIN = 1;
 const RATING_MAX = 5;
 
+/* Category values for preferred_activity, as the model expects them.
+
+   ⚠ Only "public_speaking" is confirmed — it is the value in the working
+   sample. The other six follow the same snake_case convention but have NOT
+   been verified against the training data. A decision tree given a category
+   it never saw in training will mispredict rather than error, so if these do
+   not match your dataset's column values exactly, correct them here and in
+   CLASSIFIER_ACTIVITIES in src/SmartPath.jsx. */
 export const ACTIVITIES = [
-  "Solving math problems",
-  "Doing science experiments",
-  "Running a small business",
-  "Writing or speaking",
-  "Working with computers",
-  "Drawing or designing",
-  "Building or repairing things",
+  "solving_math_problems",
+  "doing_science_experiments",
+  "running_a_business",
+  "public_speaking",
+  "working_with_computers",
+  "drawing_or_designing",
+  "building_or_repairing",
 ];
 
-/* Best-effort rate limit, same caveat as the chat endpoint: it is per
-   serverless instance, not global. */
+/* Best-effort rate limit; per serverless instance, not global. */
 const WINDOW_MS = 60_000;
 const MAX_PER_WINDOW = 30;
 const hits = new Map();
@@ -90,56 +96,39 @@ function validate(body) {
   return null;
 }
 
-/* AutoTrain tabular models take columns + rows; text-classification models
-   take a sentence. Which one applies depends on how the model was trained,
-   so the shape is selected by HF_CLASSIFIER_FORMAT. */
-function buildPayload(answers, format) {
-  if (format === "text") {
-    const sentence = FEATURES.map((f) => f + ": " + answers[f]).join(", ");
-    return { inputs: sentence };
-  }
-  return {
-    inputs: {
-      data: [FEATURES.map((f) => answers[f])],
-      columns: FEATURES,
-    },
-  };
+/* AutoTrain takes one object per row under "data". */
+function buildPayload(answers) {
+  const row = {};
+  for (const f of FEATURES) row[f] = answers[f];
+  return { data: [row] };
 }
 
-/* Hugging Face returns several shapes depending on the task and endpoint.
-   Normalise them all to a ranked [{ label, score }] list. */
-function normalise(raw) {
-  let list = raw;
+/* Turn AutoTrain's prediction into { strand, confidence, ranked }.
+   probabilities is an object keyed by class, so it becomes the ranked bars. */
+function normalise(data) {
+  if (!data || typeof data !== "object") return null;
+  if (data.success === false) return null;
 
-  /* Text classification nests one array per input. */
-  if (Array.isArray(list) && Array.isArray(list[0])) list = list[0];
+  const first = Array.isArray(data.predictions) ? data.predictions[0] : null;
+  if (!first || typeof first !== "object") return null;
 
-  /* Tabular endpoints wrap the answer in an object. */
-  if (list && !Array.isArray(list) && typeof list === "object") {
-    if (Array.isArray(list.predictions)) list = list.predictions;
-    else if (Array.isArray(list.labels)) list = list.labels;
-    else if (Array.isArray(list.data)) list = list.data;
+  const strand = first.predicted_class;
+  if (typeof strand !== "string" || !strand.trim()) return null;
+
+  const confidence = typeof first.confidence_score === "number" ? first.confidence_score : null;
+
+  let ranked = [{ label: strand, score: confidence }];
+  const probs = first.probabilities;
+  if (probs && typeof probs === "object" && !Array.isArray(probs)) {
+    const entries = Object.entries(probs)
+      .filter(([, v]) => typeof v === "number")
+      .map(([label, score]) => ({ label, score }))
+      .sort((a, b) => b.score - a.score);
+    if (entries.length) ranked = entries;
   }
 
-  if (!Array.isArray(list) || !list.length) return null;
-
-  /* Tabular models often return bare labels: ["STEM"] or [2]. */
-  if (typeof list[0] !== "object") {
-    return [{ label: String(list[0]), score: null }];
-  }
-
-  const ranked = list
-    .filter((r) => r && (r.label !== undefined || r.class !== undefined))
-    .map((r) => ({
-      label: String(r.label !== undefined ? r.label : r.class),
-      score: typeof r.score === "number" ? r.score : typeof r.probability === "number" ? r.probability : null,
-    }))
-    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-
-  return ranked.length ? ranked : null;
+  return { strand, confidence, ranked, algorithm: data.algorithm || null };
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function handleClassify(body, ip = "local") {
   sweep();
@@ -150,72 +139,50 @@ export async function handleClassify(body, ip = "local") {
   const problem = validate(body);
   if (problem) return { status: 400, body: { error: problem } };
 
-  const url = process.env.HF_CLASSIFIER_URL;
-  const token = process.env.HF_API_TOKEN;
-  if (!url || !token) {
-    console.error("HF_CLASSIFIER_URL and/or HF_API_TOKEN are not set in the environment.");
-    return { status: 500, body: { error: "the classifier is not configured yet" } };
+  const url = process.env.AUTOTRAIN_URL || DEFAULT_URL;
+  const headers = { "Content-Type": "application/json" };
+  if (process.env.AUTOTRAIN_API_KEY) {
+    headers.Authorization = "Bearer " + process.env.AUTOTRAIN_API_KEY;
   }
 
-  const format = process.env.HF_CLASSIFIER_FORMAT === "text" ? "text" : "tabular";
-  const payload = buildPayload(body.answers, format);
-
-  /* A serverless Hugging Face model that has gone cold answers 503 with an
-     estimated load time. Wait once and try again rather than failing. */
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    let res;
-    try {
-      res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + token,
-        },
-        body: JSON.stringify(payload),
-      });
-    } catch (e) {
-      console.error("Classifier request failed:", e && e.message ? e.message : e);
-      return { status: 502, body: { error: "could not reach the classifier" } };
-    }
-
-    const text = await res.text();
-    let data = null;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      /* leave data null and fall through to the error below */
-    }
-
-    if (res.status === 503 && attempt === 0) {
-      const wait = data && typeof data.estimated_time === "number" ? Math.min(data.estimated_time, 20) : 5;
-      await sleep(wait * 1000);
-      continue;
-    }
-
-    if (!res.ok) {
-      console.error("Classifier returned", res.status, text.slice(0, 400));
-      if (res.status === 503) {
-        return { status: 503, body: { error: "the model is still warming up — try again in a moment" } };
-      }
-      if (res.status === 401 || res.status === 403) {
-        return { status: 500, body: { error: "the classifier rejected our credentials" } };
-      }
-      return { status: 502, body: { error: "the classifier could not score that" } };
-    }
-
-    const ranked = normalise(data);
-    if (!ranked) {
-      console.error("Unrecognised classifier response:", text.slice(0, 400));
-      return { status: 502, body: { error: "the classifier returned something unexpected" } };
-    }
-
-    return {
-      status: 200,
-      body: { strand: ranked[0].label, confidence: ranked[0].score, ranked: ranked.slice(0, 6) },
-    };
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildPayload(body.answers)),
+    });
+  } catch (e) {
+    console.error("AutoTrain request failed:", e && e.message ? e.message : e);
+    return { status: 502, body: { error: "could not reach the classifier" } };
   }
 
-  return { status: 503, body: { error: "the model is still warming up — try again in a moment" } };
+  const text = await res.text();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    /* fall through to the error below */
+  }
+
+  if (!res.ok) {
+    console.error("AutoTrain returned", res.status, text.slice(0, 400));
+    if (res.status === 401 || res.status === 403) {
+      return { status: 500, body: { error: "the classifier rejected our credentials" } };
+    }
+    if (res.status === 429) {
+      return { status: 429, body: { error: "the classifier is busy — try again in a moment" } };
+    }
+    return { status: 502, body: { error: "the classifier could not score that" } };
+  }
+
+  const result = normalise(data);
+  if (!result) {
+    console.error("Unrecognised AutoTrain response:", text.slice(0, 400));
+    return { status: 502, body: { error: "the classifier returned something unexpected" } };
+  }
+
+  return { status: 200, body: result };
 }
 
 /* Netlify Functions (v2) entry point. */

@@ -733,15 +733,26 @@ const CLASSIFIER_QUESTIONS = [
   { key: "hands_on_interest", label: "Hands-on work", hint: "Building, repairing, cooking, machines" },
 ];
 
+/* The student sees `label`; the model receives `value`. AutoTrain's
+   preferred_activity column holds snake_case categories — the working sample
+   uses "public_speaking".
+
+   ⚠ Only "public_speaking" is confirmed. The other six follow the same
+   convention but are NOT verified against the training data, and a decision
+   tree given an unseen category mispredicts silently rather than erroring. If
+   they differ from your dataset, fix them here and in ACTIVITIES in
+   netlify/functions/classify.mjs. */
 const CLASSIFIER_ACTIVITIES = [
-  "Solving math problems",
-  "Doing science experiments",
-  "Running a small business",
-  "Writing or speaking",
-  "Working with computers",
-  "Drawing or designing",
-  "Building or repairing things",
+  { value: "solving_math_problems", label: "Solving math problems" },
+  { value: "doing_science_experiments", label: "Doing science experiments" },
+  { value: "running_a_business", label: "Running a small business" },
+  { value: "public_speaking", label: "Speaking or presenting" },
+  { value: "working_with_computers", label: "Working with computers" },
+  { value: "drawing_or_designing", label: "Drawing or designing" },
+  { value: "building_or_repairing", label: "Building or repairing things" },
 ];
+
+const ACTIVITY_VALUES = CLASSIFIER_ACTIVITIES.map((a) => a.value);
 
 const RATING_WORDS = ["Not at all", "A little", "Somewhat", "A lot", "Very much"];
 
@@ -756,9 +767,11 @@ const blankQuiz = {
   preferred_activity: "",
 };
 
-/* The model's label may be a bare strand ("STEM") or a number, while the
-   profile dropdown carries fuller names ("TVL — ICT"). Line them up when we
-   can so the prediction can be applied to the profile in one click. */
+/* The model's classes are ABM, GAS, HUMSS, STEM and TVL, while the profile
+   dropdown splits TVL into four tracks. Line the others up so the prediction
+   can be applied in one click; a bare "TVL" stays unmatched on purpose, since
+   picking a track for the student would be inventing an answer the model did
+   not give. */
 const STRAND_OPTIONS = [
   "STEM", "ABM", "HUMSS", "GAS",
   "TVL — Home Economics", "TVL — ICT", "TVL — Industrial Arts", "TVL — Agri-Fishery",
@@ -768,14 +781,14 @@ const STRAND_OPTIONS = [
 function matchStrandOption(label) {
   const key = String(label || "").trim().toLowerCase();
   if (!key) return null;
+  /* "TVL" alone covers four different tracks — leave it for the student. */
+  if (key === "tvl") return null;
   const exact = STRAND_OPTIONS.find((o) => o.toLowerCase() === key);
   if (exact) return exact;
   const loose = STRAND_OPTIONS.find(
     (o) => o.toLowerCase().replace(/[^a-z]/g, "") === key.replace(/[^a-z]/g, "")
   );
-  if (loose) return loose;
-  const starts = STRAND_OPTIONS.find((o) => o.toLowerCase().startsWith(key) || key.startsWith(o.toLowerCase()));
-  return starts || null;
+  return loose || null;
 }
 
 function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfile, save }) {
@@ -783,7 +796,11 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
 
-  const answered = !!quiz.preferred_activity;
+  /* Work saved before the options carried model values holds prose like
+     "Writing or speaking", which the model would reject. Treat anything
+     that is not a current value as unanswered. */
+  const activity = ACTIVITY_VALUES.includes(quiz.preferred_activity) ? quiz.preferred_activity : "";
+  const answered = !!activity;
 
   function set(key, value) {
     const next = { ...quiz, [key]: value };
@@ -802,7 +819,7 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
       const res = await fetch("/api/classify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answers: quiz }),
+        body: JSON.stringify({ answers: { ...quiz, preferred_activity: activity } }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
@@ -865,12 +882,12 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
           <Field label="Which would you rather do?" hint="Pick the one closest to how you like to spend time.">
             <select
               className="sp-input"
-              value={quiz.preferred_activity}
+              value={activity}
               onChange={(e) => set("preferred_activity", e.target.value)}
             >
               <option value="">Choose one…</option>
               {CLASSIFIER_ACTIVITIES.map((a) => (
-                <option key={a}>{a}</option>
+                <option key={a.value} value={a.value}>{a.label}</option>
               ))}
             </select>
           </Field>
@@ -916,6 +933,13 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
             </ul>
           ) : null}
 
+          {!suggested && String(result.strand).trim().toUpperCase() === "TVL" ? (
+            <p className="sp-reality">
+              TVL covers four tracks in your profile — Home Economics, ICT, Industrial Arts and
+              Agri-Fishery. Open <strong>Your profile</strong> and pick the one closest to what you want to do.
+            </p>
+          ) : null}
+
           {suggested ? (
             <div className="sp-actions">
               <button
@@ -933,7 +957,9 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
           ) : null}
 
           <p className="sp-fineprint">
-            This is a prediction from a model trained on past student answers, not a decision.
+            {result.algorithm
+              ? "This is a " + result.algorithm + " prediction from a model trained on past student answers, not a decision. "
+              : "This is a prediction from a model trained on past student answers, not a decision. "}
             Your interests and the careers below matter more than one label.
           </p>
         </div>

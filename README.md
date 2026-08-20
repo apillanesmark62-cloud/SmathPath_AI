@@ -15,7 +15,7 @@ src/SmartPath.jsx               the whole app (UI, styles, logic)
 src/data/places.js              Philippine cities, provinces and schools
 src/index.css                   minimal page reset
 netlify/functions/chat.mjs      Anthropic endpoint (holds the API key)
-netlify/functions/classify.mjs  strand classifier endpoint (holds the HF token)
+netlify/functions/classify.mjs  strand classifier endpoint (calls AutoTrain)
 vite.config.js                  build config + /api/* middleware for `npm run dev`
 netlify.toml                    build, routing and header config for Netlify
 ```
@@ -76,8 +76,8 @@ college can find their options in one click.
 ### Strand classifier
 
 The **Career match** tab opens with an eight-question form scored by the
-AutoTrain model on Hugging Face. Seven questions are 1-5 interest ratings and
-the eighth is a category, matching the model's features:
+AutoTrain Decision Tree model. Seven questions are 1-5 interest ratings and the
+eighth is a category, matching the model's `feature_columns`:
 
 | Feature | Input |
 | --- | --- |
@@ -88,30 +88,52 @@ the eighth is a category, matching the model's features:
 | `technology_interest` | rating, 1-5 |
 | `creative_interest` | rating, 1-5 |
 | `hands_on_interest` | rating, 1-5 |
-| `preferred_activity` | one of seven activities |
+| `preferred_activity` | one of seven categories |
 
-Submitting posts to `/api/classify`, which adds the Hugging Face token
-server-side and calls the model. The predicted strand is shown with its
-confidence and a ranked bar for each label, and can be written to the
-student's profile in one click. Answers and the result are saved with the rest
-of their work, so both survive a reload.
+Submitting posts to `/api/classify`, which forwards the answers to AutoTrain
+and normalises the reply. The predicted strand is shown with its confidence and
+a bar per class from `probabilities`, and can be written to the student's
+profile in one click. Answers and result are saved with the rest of their work,
+so both survive a reload.
 
-Configure it with `HF_CLASSIFIER_URL`, `HF_API_TOKEN` and optionally
-`HF_CLASSIFIER_FORMAT` (see `.env.example`). Until those are set the form
-renders and validates but returns "the classifier is not configured yet"
-instead of a prediction — the rest of SmartPath is unaffected.
+**The wire format.** `netlify/functions/classify.mjs` sends one row under
+`data`:
 
-**Response shapes.** Hugging Face returns different shapes per task, so
-`netlify/functions/classify.mjs` normalises `[{label, score}]`,
-`[[{label, score}]]`, `{predictions: [...]}` and a bare `["STEM"]` into one
-`{ strand, confidence, ranked }` result. A cold serverless model answers `503`
-with an estimated load time; the function waits and retries once.
+```json
+POST https://api.autotrain.app/api/autotrain
+Content-Type: application/json
 
-**Keep in step.** The `FEATURES` and `ACTIVITIES` lists in
-`netlify/functions/classify.mjs` and the `CLASSIFIER_QUESTIONS` /
-`CLASSIFIER_ACTIVITIES` lists in `src/SmartPath.jsx` describe the same model
-inputs. If the model is retrained with different features or activity labels,
-change both.
+{ "data": [ { "math_interest": 2, "science_interest": 1, "business_interest": 2,
+              "communication_interest": 5, "technology_interest": 2,
+              "creative_interest": 5, "hands_on_interest": 3,
+              "preferred_activity": "public_speaking" } ] }
+```
+
+and reads `predictions[0].predicted_class` and `predictions[0].confidence_score`
+from the reply, with `probabilities` becoming the ranked bars. A response
+carrying `success: false` is treated as a failure.
+
+**Configuration is optional.** The endpoint is the default in
+`classify.mjs`, and the working request carries no auth header, so the
+classifier runs with nothing set. `AUTOTRAIN_URL` overrides the endpoint, and
+`AUTOTRAIN_API_KEY` — if the deployment ever requires one — is sent as
+`Authorization: Bearer <key>` from the server side only.
+
+**⚠ Activity categories are only partly confirmed.** `preferred_activity` is a
+snake_case category. `public_speaking` is verified — it is the value in the
+working sample. The other six follow the same convention but have **not** been
+checked against the training data. A decision tree given a category it never
+saw in training mispredicts silently rather than erroring, so if these differ
+from your dataset's column values, correct them in both places:
+`ACTIVITIES` in `netlify/functions/classify.mjs` and `CLASSIFIER_ACTIVITIES`
+in `src/SmartPath.jsx`. The student sees the `label`; the model receives the
+`value`.
+
+**TVL is left to the student.** The model's classes are ABM, GAS, HUMSS, STEM
+and TVL, but the profile splits TVL into four tracks (Home Economics, ICT,
+Industrial Arts, Agri-Fishery). A `TVL` prediction therefore shows the result
+and a note, without an apply button — picking a track for the student would be
+inventing an answer the model did not give.
 
 ## Running it locally
 
@@ -146,9 +168,10 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | Key | Value |
    | --- | --- |
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
-   | `HF_CLASSIFIER_URL` | your AutoTrain model's inference URL |
-   | `HF_API_TOKEN` | a Hugging Face access token |
-   | `HF_CLASSIFIER_FORMAT` | `tabular` (default) or `text` |
+
+   The classifier needs no variables — the AutoTrain endpoint is the default in
+   `classify.mjs` and the request carries no auth. Set `AUTOTRAIN_URL` or
+   `AUTOTRAIN_API_KEY` only if that changes.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 
@@ -156,8 +179,10 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
 
 The browser never sees a key. It posts to `/api/chat` and `/api/classify` on
 your own origin; Netlify routes those to `netlify/functions/chat.mjs` and
-`netlify/functions/classify.mjs`, which read `ANTHROPIC_API_KEY` and
-`HF_API_TOKEN` from the server environment and call Anthropic and Hugging Face.
+`netlify/functions/classify.mjs`, which read their credentials from the server
+environment and call Anthropic and AutoTrain. Keeping the AutoTrain call
+server-side also means the browser is never subject to that host's CORS policy,
+and a key can be added later without touching client code.
 
 Two things keep it that way:
 
@@ -170,7 +195,7 @@ To confirm after a build, search `dist/` — there should be no key and no
 `api.anthropic.com`:
 
 ```bash
-npm run build && grep -ri "sk-ant\|hf_\|api.anthropic.com\|huggingface" dist/ ; echo "exit $? (1 = clean)"
+npm run build && grep -ri "sk-ant\|api.anthropic.com\|AUTOTRAIN_API_KEY" dist/ ; echo "exit $? (1 = clean)"
 ```
 
 The endpoint also pins the model server-side, validates the request shape, caps
