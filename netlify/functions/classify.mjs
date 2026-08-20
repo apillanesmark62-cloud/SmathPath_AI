@@ -10,17 +10,33 @@
    AutoTrain Testing Console verbatim — see README.
 
    Environment variables:
-     AUTOTRAIN_URL      REQUIRED. The prediction endpoint. The fallback below
-                        answers 404 {"detail":"Not Found"} — the origin is
-                        reachable but has no route there — so it exists only to
-                        produce a diagnosable failure rather than a silent one.
-                        Set this to the URL your Testing Console posts to.
+     AUTOTRAIN_URL      optional — overrides DEFAULT_URL below. Set it when the
+                        job id changes, i.e. when the model is retrained and
+                        AutoTrain issues a new one.
      AUTOTRAIN_API_KEY  optional — sent as "Authorization: Bearer <key>" when
-                        set. The working sample sends no auth header, so this
-                        is left unset unless the endpoint turns out to want one.
+                        set. The Testing Console's request carries no auth
+                        header, so this stays unset unless the endpoint starts
+                        asking for one.
    ========================================================== */
 
-const DEFAULT_URL = "https://api.autotrain.app/api/autotrain";
+/* The prediction endpoint, taken from the Testing Console's own network
+   traffic rather than inferred.
+
+   Prediction is per-job: the path names the training job, and its id is the
+   same value AutoTrain returns as model_id. Retraining issues a new job, so
+   if predictions start coming back 404, this id is the thing that went stale
+   — override it with AUTOTRAIN_URL rather than editing this line.
+
+   ?access=dashboard is part of the URL the console uses and is carried
+   through verbatim. It is a mode flag, not a credential, but it is also the
+   part most likely to tie the request to a signed-in dashboard session — if
+   this endpoint ever answers 401 or 403 from the deployed function while the
+   console still works, that is the first thing to suspect.
+
+   None of this reaches the browser: the client posts to /api/classify on its
+   own origin and this function makes the outbound call. */
+export const DEFAULT_URL =
+  "https://api.autotrain.app/api/autotrain/jobs/cdf2edb7-cddd-4abb-9124-93a90d53d3f2/predict?access=dashboard";
 
 /* The model's feature_columns, in the order AutoTrain reports them. */
 export const FEATURES = [
@@ -144,15 +160,14 @@ function withTrailingSlash(url) {
    sits beside AutoTrain's own message rather than replacing it — the point is
    to say what to do about the reply, not to paraphrase it. */
 function readStatus(status, contentType) {
+  const configured = process.env.AUTOTRAIN_URL ? "AUTOTRAIN_URL" : "the endpoint in classify.mjs";
+
   if (status === 404) {
-    const json = /json/i.test(contentType || "");
-    const unset = !process.env.AUTOTRAIN_URL;
     return (
-      "A 404" + (json ? " with a JSON body" : "") + " means the server answered but has no route " +
-      "at that path — so the endpoint URL is wrong, not the questionnaire or the request body. " +
-      (unset ? "AUTOTRAIN_URL is not set, so this used the built-in fallback, which is known to answer 404. " : "") +
-      "Open your AutoTrain Testing Console with the browser's Network tab recording, run one " +
-      "prediction, and copy the URL it actually posts to; then set AUTOTRAIN_URL to that and redeploy."
+      "A 404 means the server answered but has no route at that path. The URL names a " +
+      "training job, and retraining issues a new job id, so a stale id is the likeliest " +
+      "cause. Run one prediction in the AutoTrain Testing Console with the browser's " +
+      "Network tab recording, copy the Request URL, and set AUTOTRAIN_URL to it."
     );
   }
   if (status === 405) {
@@ -162,19 +177,22 @@ function readStatus(status, contentType) {
     return "A 422 means the path is right and the body is not — the field names or their types do not match what the model expects.";
   }
   if (status === 401 || status === 403) {
-    return "The endpoint wants credentials this deployment does not have. Set AUTOTRAIN_API_KEY if the Testing Console sends a token, or check whether the request must come from a signed-in session.";
+    return (
+      "The endpoint refused this request but not the Testing Console's. The console runs " +
+      "inside a signed-in dashboard session, so it may be sending a cookie or token that " +
+      "this server-side call is not. Compare the request headers in the console's Network " +
+      "tab with the ones listed below; if there is an Authorization header, put its token " +
+      "in AUTOTRAIN_API_KEY. Do not move the call into the browser to work around it — " +
+      "that would publish " + configured + " to every visitor."
+    );
   }
   return null;
 }
 
-/* Only a 404 earns a second URL: it is the one status meaning "no route here",
-   which the trailing-slash variant can answer. Every other refusal is about
-   the request or the server, and repeating it would only add noise. */
+/* Only a 404 earns the second URL: it is the one status meaning "no route
+   here", which the trailing-slash variant can answer. Every other refusal is
+   about the request or the server, and repeating it would only add noise. */
 const RETRYABLE = new Set([404]);
-
-/* Remembered for the life of the instance, so only the first request after a
-   cold start pays for the extra round trip. */
-let preferredShape = null;
 
 /* How much of a raw upstream body to keep per attempt. Generous on purpose:
    the whole point is that nothing is thrown away before it can be read. */
@@ -283,11 +301,7 @@ export async function handleClassify(body, ip = "local") {
   const shownHeaders = { ...headers };
   if (shownHeaders.Authorization) shownHeaders.Authorization = "Bearer <redacted>";
 
-  let attempts = attemptsFor(body.answers, baseUrl);
-  if (preferredShape) {
-    const known = attempts.filter((a) => a.label === preferredShape);
-    if (known.length) attempts = known.concat(attempts.filter((a) => a.label !== preferredShape));
-  }
+  const attempts = attemptsFor(body.answers, baseUrl);
 
   /* Every attempt is recorded in full — request as sent, status, response
      headers, and the response body as text exactly as it arrived, before any
@@ -371,7 +385,6 @@ export async function handleClassify(body, ip = "local") {
       const result = normalise(data);
       if (result) {
         step.outcome = "accepted";
-        preferredShape = attempt.label;
         console.log("[classify] ACCEPTED shape=" + attempt.label + " -> " + result.strand);
         return { status: 200, body: result };
       }
@@ -419,9 +432,8 @@ export async function handleClassify(body, ip = "local") {
     if (!RETRYABLE.has(res.status)) break;
   }
 
-  /* Every shape was refused. The first refusal is the honest one to report —
-     the later ones only differ in where the model id sat. */
-  preferredShape = null;
+  /* Both URLs were refused. The first refusal is the honest one to report —
+     the second only differs by a trailing slash. */
   firstFailure.body.trace = trace;
   firstFailure.body.env = env;
   return firstFailure;

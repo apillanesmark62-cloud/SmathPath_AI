@@ -100,7 +100,7 @@ so both survive a reload.
 `data`:
 
 ```json
-POST https://api.autotrain.app/api/autotrain
+POST https://api.autotrain.app/api/autotrain/jobs/<job id>/predict?access=dashboard
 Content-Type: application/json
 
 { "data": [ { "math_interest": 2, "science_interest": 1, "business_interest": 2,
@@ -115,32 +115,27 @@ carrying `success: false` is treated as a failure. If the URL's path has no
 trailing slash, a 404 is retried once with one — FastAPI with `redirect_slashes`
 off answers a missing slash with a flat 404 rather than a redirect.
 
-**⚠ The default endpoint returns 404 — set `AUTOTRAIN_URL`.** Live from the
-deployed function, `POST https://api.autotrain.app/api/autotrain` answers:
+**Prediction is per training job.** The endpoint is not `/api/autotrain` —
+that path answers `404 {"detail":"Not Found"}`, which cost a few rounds to
+work out. The real URL, read off the Testing Console's own network traffic,
+names the job:
 
 ```
-HTTP 404 Not Found
-content-type: application/json
-cf-cache-status: DYNAMIC
-
-{"detail":"Not Found"}
+POST https://api.autotrain.app/api/autotrain/jobs/<job id>/predict?access=dashboard
 ```
 
-`{"detail":"Not Found"}` is Starlette/FastAPI's stock 404 and
-`cf-cache-status: DYNAMIC` means Cloudflare passed the request to the origin,
-so the server received it and has no route at that path. A wrong method would
-be 405 and a wrong body 422 — 404 is specifically "no such path". The request
-body was never at fault, and reshaping it cannot help.
+The job id is the same value AutoTrain returns as `model_id`. It is compiled
+into `classify.mjs`, so the classifier needs no configuration — but retraining
+issues a **new job id**, and the old URL then 404s. That is the one thing to
+expect to have to change: copy the fresh Request URL from the console and set
+`AUTOTRAIN_URL`.
 
-Find the real path the way the Testing Console does it: open the console with
-the browser's Network tab recording, run one prediction, and read the Request
-URL off the request that appears. Or run `npm run probe:autotrain`, which asks
-the server for its own OpenAPI route list and then posts the real body to the
-paths a prediction endpoint usually lives at. Either way, put the answer in
-`AUTOTRAIN_URL` and redeploy.
-
-`AUTOTRAIN_API_KEY` — if the console turns out to send a credential — is sent
-as `Authorization: Bearer <key>` from the server side only.
+`?access=dashboard` is carried through verbatim because the console sends it.
+It is a mode flag rather than a credential, but it is also the part most
+likely to tie the request to a signed-in dashboard session — so if the
+deployed function ever gets a 401 or 403 while the console still works, start
+by diffing the request headers. `AUTOTRAIN_API_KEY`, if it comes to that, is
+sent as `Authorization: Bearer <key>` from the server side only.
 
 **When AutoTrain refuses the request.** Nothing is summarised away. The error
 line is AutoTrain's own words — `AutoTrain returned 400: Missing required
@@ -230,12 +225,11 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | --- | --- |
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
 
-   | `AUTOTRAIN_URL` | the prediction endpoint — **required**, see below |
 
-   The built-in fallback returns 404, so the classifier needs `AUTOTRAIN_URL`
-   pointed at the path your Testing Console actually posts to. Set
-   `AUTOTRAIN_API_KEY` only if that endpoint asks for one. See **Strand
-   classifier** above.
+   The classifier needs nothing — its endpoint is compiled into
+   `classify.mjs`. Set `AUTOTRAIN_URL` when the model is retrained and the job
+   id changes, and `AUTOTRAIN_API_KEY` only if the endpoint starts asking for
+   one. See **Strand classifier** above.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 

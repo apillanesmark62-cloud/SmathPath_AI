@@ -2,13 +2,12 @@
 /* ==========================================================
    Find the AutoTrain prediction endpoint.
 
-   The deployed site posts to https://api.autotrain.app/api/autotrain and gets
+   Checks the endpoint compiled into netlify/functions/classify.mjs, and, if it
+   is refused, looks for the path that would work.
 
-     HTTP 404  {"detail":"Not Found"}
-
-   which is Starlette/FastAPI's stock 404 — the server answered, and it has no
-   route at that path. The request body was never the problem, so this script
-   looks for the path that does exist rather than reshaping the body.
+   Prediction is per training job — /api/autotrain/jobs/<job id>/predict — so
+   retraining issues a new id and the compiled-in URL 404s. That is what this
+   is for: confirm the endpoint still answers, or find where it moved.
 
    It runs from a machine that can reach the endpoint — your laptop. Every
    request here is real; nothing is mocked.
@@ -26,7 +25,8 @@ const args = Object.fromEntries(
   })
 );
 
-const BASE = args.url || process.env.AUTOTRAIN_URL || "https://api.autotrain.app/api/autotrain";
+const { DEFAULT_URL } = await import("../netlify/functions/classify.mjs");
+const BASE = args.url || process.env.AUTOTRAIN_URL || DEFAULT_URL;
 const API_KEY = args.key || process.env.AUTOTRAIN_API_KEY || "";
 
 const origin = new URL(BASE).origin;
@@ -100,19 +100,25 @@ async function routeTable() {
 /* ---------- 2. try the paths a prediction endpoint usually lives at ----- */
 
 function candidates() {
-  const basePath = new URL(BASE).pathname.replace(/\/+$/, "");
-  const out = [
-    basePath,
-    basePath + "/",
-    basePath + "/predict",
-    basePath + "/predictions",
-    basePath + "/inference",
-    basePath + "/infer",
-    "/api/predict",
-    "/api/predictions",
-    "/api/inference",
-    "/predict",
-  ];
+  const u = new URL(BASE);
+  const basePath = u.pathname.replace(/\/+$/, "");
+  const out = [basePath, basePath + "/"];
+
+  /* If the configured path is a per-job predict route, the useful neighbours
+     are the other shapes that route might take. */
+  const job = basePath.match(/\/jobs\/([^/]+)/);
+  if (job) {
+    const id = job[1];
+    out.push(
+      "/api/autotrain/jobs/" + id + "/predict",
+      "/api/autotrain/jobs/" + id + "/predictions",
+      "/api/autotrain/jobs/" + id,
+      "/api/jobs/" + id + "/predict",
+      "/api/autotrain/models/" + id + "/predict"
+    );
+  } else {
+    out.push(basePath + "/predict", basePath + "/predictions", "/api/predict", "/predict");
+  }
   return [...new Set(out)];
 }
 
@@ -124,8 +130,9 @@ async function tryPaths() {
 
   const interesting = [];
 
+  const query = new URL(BASE).search;
   for (const path of candidates()) {
-    const url = origin + path;
+    const url = origin + path + query;
     let res, text;
     try {
       res = await fetch(url, { method: "POST", headers, body: BODY });
@@ -169,11 +176,16 @@ const win = hits.find((h) => {
 
 if (win) {
   const j = JSON.parse(win.text);
-  console.log("Found it. " + win.url + " returned a prediction:");
+  console.log(win.url + " returned a prediction:");
   console.log("  predicted_class = " + j.predictions[0].predicted_class +
     ", confidence_score = " + j.predictions[0].confidence_score);
-  console.log("\nSet this in Netlify (Site configuration -> Environment variables), then redeploy:");
-  console.log("  AUTOTRAIN_URL = " + win.url);
+  if (win.url === BASE && BASE === DEFAULT_URL) {
+    console.log("\nThat is the endpoint already compiled into classify.mjs, so there is");
+    console.log("nothing to configure — the classifier should work as deployed.");
+  } else {
+    console.log("\nSet this in Netlify (Site configuration -> Environment variables), then redeploy:");
+    console.log("  AUTOTRAIN_URL = " + win.url);
+  }
 } else if (hits.length) {
   console.log("No path returned a prediction, but these exist — they answered with");
   console.log("something other than 404, so the route is real and the request is not:\n");
