@@ -799,6 +799,10 @@ function diagText(message, diag) {
   if (!diag) return message || "";
   const out = [];
   out.push(message || "");
+  if (diag.hint) {
+    out.push("");
+    out.push(diag.hint);
+  }
   out.push("");
 
   const env = diag.env;
@@ -848,6 +852,7 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [diag, setDiag] = useState(null);
+  const [hint, setHint] = useState("");
   const [showDiag, setShowDiag] = useState(false);
   const [copied, setCopied] = useState(false);
   const [open, setOpen] = useState(false);
@@ -872,6 +877,7 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
     setBusy(true);
     setError("");
     setDiag(null);
+    setHint("");
     setShowDiag(false);
     setCopied(false);
     try {
@@ -887,8 +893,9 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
            and the trace goes behind a toggle so the exact status, headers and
            raw body can be read here instead of only in the serverless log. */
         if (data && (data.trace || data.env)) {
-          setDiag({ trace: data.trace || [], env: data.env || null, status: res.status });
+          setDiag({ trace: data.trace || [], env: data.env || null, hint: data.hint || "", status: res.status });
         }
+        if (data && data.hint) setHint(data.hint);
         throw new Error((data && data.error) || "The classifier endpoint returned status " + res.status + ".");
       }
       setResult(data);
@@ -968,6 +975,7 @@ function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfil
           </Field>
 
           <Notice kind="error" onRetry={error ? submit : null}>{error}</Notice>
+          {hint ? <p className="sp-diag-hint">{hint}</p> : null}
           {diag ? (
             <div className="sp-diag">
               <div className="sp-diag-bar">
@@ -2298,6 +2306,8 @@ function Styles() {
 .sp-quiz-ranked li{display:grid;grid-template-columns:minmax(80px,auto) 1fr auto;align-items:center;gap:10px}
 .sp-quiz-rlabel{font-size:13px;font-weight:600}
 /* the upstream's own words, for debugging a failing prediction */
+.sp-diag-hint{font-size:13px;line-height:1.6;color:var(--ink-soft);margin:-4px 0 12px;
+  padding-left:11px;border-left:2px solid var(--line)}
 .sp-diag{margin:-4px 0 12px}
 .sp-diag-bar{display:flex;gap:8px;flex-wrap:wrap}
 .sp-diag-toggle{font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;

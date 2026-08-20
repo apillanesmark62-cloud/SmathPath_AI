@@ -112,19 +112,30 @@ function validate(body) {
    job_id, but the sample request does not carry either, so the Testing Console
    must attach the id somewhere we cannot see. Rather than guess one position,
    try them in turn and keep whichever the endpoint accepts. */
-function attemptsFor(answers) {
+function attemptsFor(answers, baseUrl) {
   const row = {};
   for (const f of FEATURES) row[f] = answers[f];
 
+  const list = [];
   const modelId = process.env.AUTOTRAIN_MODEL_ID;
-  if (!modelId) return [{ label: "data only", body: { data: [row] } }];
 
-  return [
-    { label: "model_id at top level", body: { data: [row], model_id: modelId } },
-    { label: "model_id inside the row", body: { data: [{ ...row, model_id: modelId }] } },
-    { label: "model_id as a query parameter", query: modelId, body: { data: [row] } },
-    { label: "data only", body: { data: [row] } },
-  ];
+  if (modelId) {
+    list.push({ label: "model_id at top level", url: baseUrl, body: { data: [row], model_id: modelId } });
+    list.push({ label: "model_id inside the row", url: baseUrl, body: { data: [{ ...row, model_id: modelId }] } });
+    list.push({ label: "model_id as a query parameter", url: withModelQuery(baseUrl, modelId), body: { data: [row] } });
+  }
+
+  list.push({ label: "data only", url: baseUrl, body: { data: [row] } });
+
+  /* A FastAPI app with redirect_slashes turned off answers a path missing its
+     trailing slash with a flat 404 rather than a redirect, so the same URL
+     with one is worth one try before giving up. */
+  const slashed = withTrailingSlash(baseUrl);
+  if (slashed !== baseUrl) {
+    list.push({ label: "data only, trailing slash", url: slashed, body: { data: [row] } });
+  }
+
+  return list;
 }
 
 function withModelQuery(url, modelId) {
@@ -135,6 +146,42 @@ function withModelQuery(url, modelId) {
   } catch (e) {
     return url;
   }
+}
+
+function withTrailingSlash(url) {
+  try {
+    const u = new URL(url);
+    if (u.pathname.endsWith("/")) return url;
+    u.pathname += "/";
+    return u.href;
+  } catch (e) {
+    return url;
+  }
+}
+
+/* What a status usually means here, said once, in the caller's terms. This
+   sits beside AutoTrain's own message rather than replacing it — the point is
+   to say what to do about the reply, not to paraphrase it. */
+function readStatus(status, contentType) {
+  if (status === 404) {
+    const json = /json/i.test(contentType || "");
+    return (
+      "A 404" + (json ? " with a JSON body" : "") + " means the server answered but has no route at " +
+      "that path — so the endpoint URL is wrong, not the questionnaire or the request body. " +
+      "Open your AutoTrain Testing Console with the browser's Network tab recording, run one " +
+      "prediction, and copy the URL it actually posts to; then set AUTOTRAIN_URL to that."
+    );
+  }
+  if (status === 405) {
+    return "A 405 means the path exists but does not take POST — check the method the Testing Console uses.";
+  }
+  if (status === 422) {
+    return "A 422 means the path is right and the body is not — the field names or their types do not match what the model expects.";
+  }
+  if (status === 401 || status === 403) {
+    return "The endpoint wants credentials this deployment does not have. Set AUTOTRAIN_API_KEY if the Testing Console sends a token, or check whether the request must come from a signed-in session.";
+  }
+  return null;
 }
 
 /* A rejection worth retrying with a different shape — the endpoint understood
@@ -253,7 +300,7 @@ export async function handleClassify(body, ip = "local") {
   const shownHeaders = { ...headers };
   if (shownHeaders.Authorization) shownHeaders.Authorization = "Bearer <redacted>";
 
-  let attempts = attemptsFor(body.answers);
+  let attempts = attemptsFor(body.answers, baseUrl);
   if (preferredShape) {
     const known = attempts.filter((a) => a.label === preferredShape);
     if (known.length) attempts = known.concat(attempts.filter((a) => a.label !== preferredShape));
@@ -268,7 +315,7 @@ export async function handleClassify(body, ip = "local") {
   let firstFailure = null;
 
   for (const attempt of attempts) {
-    const url = attempt.query ? withModelQuery(baseUrl, attempt.query) : baseUrl;
+    const url = attempt.url;
     const payload = JSON.stringify(attempt.body);
     const step = {
       shape: attempt.label,
@@ -370,16 +417,18 @@ export async function handleClassify(body, ip = "local") {
       ? "AutoTrain returned " + res.status + ": " + detail
       : "AutoTrain returned " + res.status + " " + (res.statusText || "") + " with an empty body";
 
+    const hint = readStatus(res.status, contentType);
+
     if (res.status === 401 || res.status === 403) {
-      return { status: 502, body: { error: headline, upstream_status: res.status, detail, trace, env } };
+      return { status: 502, body: { error: headline, upstream_status: res.status, detail, hint, trace, env } };
     }
     if (res.status === 429) {
-      return { status: 429, body: { error: headline, upstream_status: res.status, detail, trace, env } };
+      return { status: 429, body: { error: headline, upstream_status: res.status, detail, hint, trace, env } };
     }
 
     firstFailure = firstFailure || {
       status: 502,
-      body: { error: headline, upstream_status: res.status, detail },
+      body: { error: headline, upstream_status: res.status, detail, hint },
     };
 
     /* Anything other than a complaint about the body means a different shape
