@@ -835,7 +835,13 @@ function diagText(message, diag) {
       out.push("  bearer token: NONE SENT");
     }
     if (env.deploy) {
-      out.push("  deploy context: " + env.deploy.context + " (branch " + env.deploy.branch + ")");
+      Object.entries(env.deploy).forEach(([k, v]) => out.push("  " + k + ": " + v));
+    }
+    if (env.visible_variables) {
+      out.push(
+        "  variables this function can see: " +
+          (env.visible_variables.length ? env.visible_variables.join(", ") : "(none)")
+      );
     }
     if (env.refresh_error) out.push("  token refresh failed: " + env.refresh_error);
     if (env.node) out.push("  node: " + env.node);

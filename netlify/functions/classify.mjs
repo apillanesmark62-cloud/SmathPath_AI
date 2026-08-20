@@ -320,10 +320,13 @@ function readStatus(status, contentType) {
 
     if (!fixed.token && !process.env.AUTOTRAIN_REFRESH_TOKEN) {
       return (
-        "The endpoint needs the same bearer token the AutoTrain dashboard sends, and this " +
-        "deployment has none. In Netlify, under Site configuration -> Environment variables, " +
-        "add AUTOTRAIN_API_KEY with the value of the Authorization header from the Testing " +
-        "Console's successful request, then redeploy."
+        "The endpoint needs the same bearer token the AutoTrain dashboard sends, and no " +
+        "credential reached this function. In Netlify, under Site configuration -> " +
+        "Environment variables, add AUTOTRAIN_API_KEY with the value of the Authorization " +
+        "header from the Testing Console's successful request, then redeploy — the value is " +
+        "bound at deploy time, so saving it alone changes nothing. If you have already done " +
+        "that, compare the name against the variables listed below, and check the value is " +
+        "scoped to Functions and to the deploy context you are testing."
       );
     }
     if (expiresAt && expiresAt <= Date.now()) {
@@ -404,12 +407,25 @@ function envReport(auth) {
 
   /* Which deploy this is. Netlify scopes environment variables by context, so
      a variable added to production only is genuinely absent on a deploy
-     preview or a branch deploy — and that looks identical to never having
-     added it unless the context is named. */
-  const context = process.env.CONTEXT;
-  if (context) {
-    report.deploy = { context, branch: process.env.BRANCH || "unknown" };
+     preview or a branch deploy, and that is indistinguishable from never
+     having added it unless the context is named. Not every one of these
+     reaches function runtime, so report whichever do. */
+  const deploy = {};
+  for (const key of ["CONTEXT", "BRANCH", "SITE_NAME", "DEPLOY_URL", "DEPLOY_ID"]) {
+    if (process.env[key]) deploy[key] = process.env[key];
   }
+  if (Object.keys(deploy).length) report.deploy = deploy;
+
+  /* The NAMES of the variables this function can actually see, filtered to the
+     ones that concern it. Names are not secrets and no value is read here.
+
+     This is the difference between "you have not added it" and "you added it
+     as AUTOTRAIN_APIKEY", or with a trailing space, or in lower case — three
+     mistakes that all look identical from a NOT SET line, and none of which
+     any amount of staring at the Netlify UI reliably catches. */
+  report.visible_variables = Object.keys(process.env)
+    .filter((k) => /autotrain|firebase|anthropic/i.test(k))
+    .sort();
 
   if (auth && auth.refreshError) report.refresh_error = auth.refreshError;
   return report;
