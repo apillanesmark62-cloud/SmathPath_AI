@@ -143,7 +143,17 @@ function staticToken() {
 async function refreshedToken() {
   const refresh = process.env.AUTOTRAIN_REFRESH_TOKEN;
   const apiKey = process.env.AUTOTRAIN_FIREBASE_API_KEY;
-  if (!refresh || !apiKey) return null;
+
+  /* Half-configured is the likeliest way to set this up wrong, and staying
+     quiet about it turns into a 401 that blames something else. Name the
+     missing half instead. */
+  if (refresh && !apiKey) {
+    throw new Error("AUTOTRAIN_REFRESH_TOKEN is set but AUTOTRAIN_FIREBASE_API_KEY is not — both are needed");
+  }
+  if (apiKey && !refresh) {
+    throw new Error("AUTOTRAIN_FIREBASE_API_KEY is set but AUTOTRAIN_REFRESH_TOKEN is not — both are needed");
+  }
+  if (!refresh) return null;
 
   if (cachedToken && cachedToken.expiresAt - Date.now() > RENEW_MARGIN_MS) {
     return cachedToken.token;
@@ -297,7 +307,7 @@ function withTrailingSlash(url) {
 /* What a status usually means here, said once, in the caller's terms. This
    sits beside AutoTrain's own message rather than replacing it — the point is
    to say what to do about the reply, not to paraphrase it. */
-function readStatus(status, contentType) {
+function readStatus(status, contentType, auth) {
   const configured = process.env.AUTOTRAIN_URL ? "AUTOTRAIN_URL" : "the endpoint in classify.mjs";
 
   if (status === 404) {
@@ -318,6 +328,22 @@ function readStatus(status, contentType) {
     const fixed = staticToken();
     const expiresAt = fixed.token ? tokenExpiry(fixed.token) : null;
 
+    /* A configured refresh that failed outranks everything else: it explains
+       the 401 directly, and any other advice would send you to fix something
+       that is not broken. */
+    if (auth && auth.refreshError) {
+      return "The token could not be renewed, so the request went out with whatever credential was left: " +
+        auth.refreshError + ".";
+    }
+    if (auth && auth.source === "AUTOTRAIN_REFRESH_TOKEN") {
+      return (
+        "A freshly minted token was sent and still refused. That points at the refresh token " +
+        "belonging to a different account or Firebase project than the model — check that " +
+        "AUTOTRAIN_FIREBASE_API_KEY is the same project's web API key, and that you were " +
+        "signed in as the model's owner when you copied the refresh token."
+      );
+    }
+
     if (!fixed.token && !process.env.AUTOTRAIN_REFRESH_TOKEN) {
       return (
         "The endpoint needs the same bearer token the AutoTrain dashboard sends, and no " +
@@ -333,10 +359,11 @@ function readStatus(status, contentType) {
       const hours = Math.round((Date.now() - expiresAt) / 3600000);
       const ago = hours < 1 ? "less than an hour" : hours === 1 ? "an hour" : hours + " hours";
       return (
-        fixed.source + " holds a token that expired " + ago + " ago. Firebase ID tokens last " +
-        "one hour, so replacing it buys another hour. To stop doing that, set " +
-        "AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY instead and the function will " +
-        "renew the token itself."
+        fixed.source + " holds a token that expired " + ago + " ago, and no refresh is " +
+        "configured. Firebase ID tokens last one hour, so replacing it buys another hour. To " +
+        "stop doing that, add AUTOTRAIN_REFRESH_TOKEN and AUTOTRAIN_FIREBASE_API_KEY — spelled " +
+        "exactly that way — and the function will renew the token itself. Delete " +
+        fixed.source + " once they are in place."
       );
     }
     return (
@@ -601,7 +628,7 @@ export async function handleClassify(body, ip = "local") {
       ? "AutoTrain returned " + res.status + ": " + detail
       : "AutoTrain returned " + res.status + " " + (res.statusText || "") + " with an empty body";
 
-    const hint = readStatus(res.status, contentType);
+    const hint = readStatus(res.status, contentType, auth);
 
     if (res.status === 401 || res.status === 403) {
       return { status: 502, body: { error: headline, upstream_status: res.status, detail, hint, trace, env } };

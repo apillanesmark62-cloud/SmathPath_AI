@@ -168,6 +168,15 @@ DevTools open:
   `?key=` parameter on any request to `identitytoolkit.googleapis.com` or
   `securetoken.googleapis.com`
 
+Note the spelling: `AUTOTRAIN_FIREBASE_API_KEY`, with an underscore between
+`API` and `KEY`. `AUTOTRAIN_FIREBASE_APIKEY` is a different variable and the
+function will not see it.
+
+**Both or neither.** Setting one without the other used to fail silently and
+surface as a 401 that blamed something else; it now says which half is
+missing. Once they are in place, delete `AUTOTRAIN_API_KEY` — refreshing takes
+precedence over it, so a stale token there is harmless but misleading.
+
 Both are secrets: they authenticate as your AutoTrain account. They belong in
 Netlify's environment, never in the repository.
 
