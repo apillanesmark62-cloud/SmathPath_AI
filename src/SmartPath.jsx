@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { PH_LOCATIONS, PH_SCHOOLS, schoolsForCity } from "./data/places.js";
+import { ACTIVITIES, ACTIVITY_VALUES, TRAITS, recommend } from "./lib/recommend.js";
 
 /* ==========================================================
    SmartPath — AI-Powered Career Guidance & Resume Builder
@@ -719,6 +720,195 @@ function ProfileTab({ profile, setProfile, onSaved, goMatch }) {
   );
 }
 
+/* ---------------- strand and career recommendation ---------------- */
+
+const RATING_WORDS = ["Not at all", "A little", "Somewhat", "A lot", "Very much"];
+
+const QUESTION_HINTS = {
+  math_interest: "Numbers, patterns, problem sets",
+  science_interest: "Experiments, how things work",
+  business_interest: "Selling, money, running things",
+  communication_interest: "Writing, speaking, persuading",
+  technology_interest: "Computers, apps, systems",
+  creative_interest: "Drawing, design, music, video",
+  hands_on_interest: "Building, repairing, cooking, machines",
+};
+
+export const blankQuiz = {
+  math_interest: 3, science_interest: 3, business_interest: 3, communication_interest: 3,
+  technology_interest: 3, creative_interest: 3, hands_on_interest: 3, preferred_activity: "",
+};
+
+/* The profile splits TVL into four tracks and offers options the engine does
+   not score, so only an exact match is offered as a one-click apply. A bare
+   "TVL" result deliberately returns null: picking a track for the student
+   would be inventing an answer they did not give. */
+function matchStrandOption(id) {
+  return ["STEM", "ABM", "HUMSS", "GAS"].includes(id) ? id : null;
+}
+
+function StrandQuiz({ quiz, setQuiz, shown, setShown, profile, setProfile, save }) {
+  const [open, setOpen] = useState(false);
+
+  const activity = ACTIVITY_VALUES.includes(quiz.preferred_activity) ? quiz.preferred_activity : "";
+  const answered = !!activity;
+
+  /* Scoring is instant arithmetic, so the result recomputes as they adjust
+     rather than waiting behind a request. */
+  const result = useMemo(
+    () => (answered ? recommend({ ...quiz, preferred_activity: activity }) : null),
+    [quiz, activity, answered]
+  );
+
+  function set(key, value) {
+    const next = { ...quiz, [key]: value };
+    setQuiz(next);
+    save({ quiz: next });
+  }
+
+  const top = result && result.topStrand;
+  const suggested = top ? matchStrandOption(top.id) : null;
+  const applied = suggested && profile.strand === suggested;
+  const visible = shown && result;
+
+  return (
+    <section className="sp-quiz">
+      <button className="sp-quiz-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <div>
+          <span className="sp-chip-label">Strand and career match</span>
+          <h3 className="sp-quiz-title">Which strand suits you?</h3>
+          <p className="sp-quiz-sub">
+            {visible
+              ? top.name + " fits your answers best (" + top.match + "%). Open to change them."
+              : "Eight quick questions, scored on this device. No account, no waiting."}
+          </p>
+        </div>
+        <span className={"sp-quiz-caret" + (open ? " is-open" : "")}>
+          <Icon name="caret" size={18} />
+        </span>
+      </button>
+
+      {open ? (
+        <div className="sp-quiz-body">
+          {TRAITS.map((q) => (
+            <div key={q.key} className="sp-rating">
+              <div className="sp-rating-top">
+                <span className="sp-rating-label">{q.label}</span>
+                <span className="sp-rating-word">{RATING_WORDS[quiz[q.key] - 1]}</span>
+              </div>
+              <div className="sp-rating-scale" role="radiogroup" aria-label={q.label}>
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    role="radio"
+                    aria-checked={quiz[q.key] === n}
+                    aria-label={RATING_WORDS[n - 1]}
+                    className={"sp-rating-dot" + (quiz[q.key] === n ? " is-on" : "")}
+                    onClick={() => set(q.key, n)}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <span className="sp-hint">{QUESTION_HINTS[q.key]}</span>
+            </div>
+          ))}
+
+          <Field label="Which would you rather do?" hint="Pick the one closest to how you like to spend time.">
+            <select
+              className="sp-input"
+              value={activity}
+              onChange={(e) => set("preferred_activity", e.target.value)}
+            >
+              <option value="">Choose one…</option>
+              {ACTIVITIES.map((a) => (
+                <option key={a.value} value={a.value}>{a.label}</option>
+              ))}
+            </select>
+          </Field>
+
+          <div className="sp-actions">
+            <button className="sp-btn sp-btn-primary" onClick={() => setShown(true)} disabled={!answered}>
+              {visible ? "Scored below" : "See my strand"}
+            </button>
+            {!answered ? <span className="sp-hint">Pick an activity to finish.</span> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {visible ? (
+        <div className="sp-quiz-result sp-fade">
+          <div className="sp-quiz-verdict">
+            <span className="sp-chip-label">Best fit</span>
+            <strong className="sp-quiz-strand">{top.name}</strong>
+            <span className="sp-quiz-conf">{top.match}% match</span>
+          </div>
+          <p className="sp-quiz-full">{top.full}</p>
+          <p className="sp-why">{top.why}</p>
+
+          {suggested ? (
+            <div className="sp-actions">
+              <button
+                className="sp-btn sp-btn-small"
+                disabled={applied}
+                onClick={async () => {
+                  const next = { ...profile, strand: suggested };
+                  setProfile(next);
+                  await save({ profile: next });
+                }}
+              >
+                {applied ? "Saved to your profile" : "Use " + suggested + " in my profile"}
+              </button>
+            </div>
+          ) : (
+            <p className="sp-hint sp-quiz-tvl">
+              TVL splits into Home Economics, ICT, Industrial Arts and Agri-Fishery. Pick the track
+              that matches your answers in your profile — this quiz will not choose one for you.
+            </p>
+          )}
+
+          <span className="sp-chip-label sp-quiz-section">All five strands</span>
+          <ul className="sp-quiz-ranked">
+            {result.strands.map((s) => (
+              <li key={s.id}>
+                <span className="sp-quiz-rlabel">{s.name}</span>
+                <span className="sp-compare-track">
+                  <span className="sp-compare-fill" style={{ width: s.match + "%" }} />
+                </span>
+                <span className="sp-quiz-rpct">{s.match}%</span>
+                <p className="sp-quiz-reason">{s.why}</p>
+              </li>
+            ))}
+          </ul>
+
+          <span className="sp-chip-label sp-quiz-section">Careers these answers point to</span>
+          <ul className="sp-joblist">
+            {result.careers.map((c) => (
+              <li key={c.title} className="sp-job">
+                <div className="sp-job-top">
+                  <span className="sp-job-title">{c.title}</span>
+                  <span className="sp-job-pct">{c.match}%</span>
+                </div>
+                <div className="sp-badges">
+                  <span className={"sp-badge sp-badge-" + fitTone(c.match)}>{fitLabel(c.match)}</span>
+                  <span className="sp-badge sp-badge-route">{ROUTES[c.route] || c.route}</span>
+                  <span className="sp-badge sp-badge-route">{c.strand}</span>
+                </div>
+                <p className="sp-quiz-reason">{c.why} {c.note}</p>
+              </li>
+            ))}
+          </ul>
+
+          <p className="sp-fineprint">
+            Scored on this device from your eight answers — no account, no internet, and the same
+            answers always give the same result. Starting points, not verdicts.
+          </p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 /* ---------------- career match ---------------- */
 const ROUTES = {
   degree: "4-year degree",
@@ -743,7 +933,7 @@ function slug(s) {
 }
 
 function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen, roadmap, setRoadmap,
-  save, goResume }) {
+  quiz, setQuiz, quizShown, setQuizShown, save, goResume }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mapBusy, setMapBusy] = useState(false);
@@ -816,6 +1006,9 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
           interview practice — you can switch any time.
         </p>
       </header>
+
+      <StrandQuiz quiz={quiz} setQuiz={setQuiz} shown={quizShown} setShown={setQuizShown}
+        profile={profile} setProfile={setProfile} save={save} />
 
       <Notice kind="error" onRetry={error ? run : null}>{error}</Notice>
       {busy ? <Loading label="Reading your profile and matching careers…" /> : null}
@@ -1479,6 +1672,8 @@ export default function SmartPath() {
   const [prep, setPrep] = useState(null);
   const [scores, setScores] = useState({});
   const [chat, setChat] = useState([]);
+  const [quiz, setQuiz] = useState(blankQuiz);
+  const [quizShown, setQuizShown] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -1510,6 +1705,8 @@ export default function SmartPath() {
     setPrep(d.prep || null);
     setScores(d.scores || {});
     setChat(d.chat || []);
+    setQuiz({ ...blankQuiz, ...(d.quiz || {}) });
+    setQuizShown(!!d.quizShown);
     setUser(u);
     setTab("home");
   }
@@ -1519,7 +1716,7 @@ export default function SmartPath() {
     const current = (await store.get("data:" + user)) || {};
     await store.set("data:" + user, {
       ...current, profile, careers, chosen, roadmap, resume,
-      resumeBuilt: built, prep, scores, chat, ...(patch || {}),
+      resumeBuilt: built, prep, scores, chat, quiz, quizShown, ...(patch || {}),
     });
   }
 
@@ -1527,7 +1724,7 @@ export default function SmartPath() {
     await store.set("session", {});
     setUser(null); setProfile(blankProfile); setCareers([]); setChosen("");
     setRoadmap(null); setResume(blankResume); setBuilt(null); setPrep(null);
-    setScores({}); setChat([]); setTab("home");
+    setScores({}); setChat([]); setQuiz(blankQuiz); setQuizShown(false); setTab("home");
   }
 
   const done = {
@@ -1571,6 +1768,7 @@ export default function SmartPath() {
         {tab === "match" ? (
           <MatchTab profile={profile} setProfile={setProfile} careers={careers} setCareers={setCareers}
             chosen={chosen} setChosen={setChosen} roadmap={roadmap} setRoadmap={setRoadmap}
+            quiz={quiz} setQuiz={setQuiz} quizShown={quizShown} setQuizShown={setQuizShown}
             save={save} goResume={() => setTab("resume")} />
         ) : null}
         {tab === "resume" ? (
@@ -1918,6 +2116,62 @@ function Styles() {
 .sp-picker-opt.is-active{background:var(--chip)}
 .sp-picker-opt.is-chosen{color:var(--route);font-weight:600}
 .sp-picker-none{margin:0;padding:14px 13px;font-size:13px;line-height:1.5;color:var(--ink-soft)}
+
+/* strand and career recommendation */
+.sp-quiz{background:var(--card);border:1.5px solid var(--line);border-left:4px solid var(--signal);
+  border-radius:5px;margin-bottom:16px;overflow:hidden}
+.sp-quiz-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;width:100%;
+  background:none;border:none;padding:16px 18px;cursor:pointer;text-align:left;font-family:inherit}
+.sp-quiz-title{font-family:var(--display);font-weight:700;font-size:17px;margin:4px 0 0;color:var(--ink)}
+.sp-quiz-sub{margin:5px 0 0;font-size:13px;line-height:1.5;color:var(--ink-soft)}
+.sp-quiz-caret{color:var(--ink-soft);display:flex;padding-top:14px;transition:transform .18s}
+.sp-quiz-caret.is-open{transform:rotate(180deg);color:var(--route)}
+.sp-quiz-body{padding:0 18px 6px;border-top:1px solid var(--line)}
+.sp-quiz-body .sp-field:first-of-type{margin-top:4px}
+
+.sp-rating{padding:13px 0;border-bottom:1px solid var(--line)}
+.sp-rating-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:8px}
+.sp-rating-label{font-size:14px;font-weight:600}
+.sp-rating-word{font-family:var(--mono);font-size:11px;color:var(--route)}
+.sp-rating-scale{display:flex;gap:6px}
+.sp-rating-dot{flex:1;min-width:0;height:38px;background:var(--card);border:1.5px solid var(--line);
+  border-radius:4px;font-family:var(--mono);font-size:13px;color:var(--ink-soft);cursor:pointer;
+  transition:background .12s,border-color .12s,color .12s}
+.sp-rating-dot:hover{border-color:var(--route)}
+.sp-rating-dot.is-on{background:var(--panel);border-color:var(--panel);color:var(--on-panel)}
+.sp-rating .sp-hint{display:block;margin-top:6px}
+
+.sp-quiz-result{padding:16px 18px;border-top:1px solid var(--line);background:var(--chip)}
+.sp-quiz-verdict{display:flex;align-items:baseline;flex-wrap:wrap;gap:10px}
+.sp-quiz-verdict .sp-chip-label{flex:0 0 100%;margin-bottom:0}
+.sp-quiz-strand{font-family:var(--display);font-weight:800;font-size:24px;letter-spacing:-.01em;color:var(--ink)}
+.sp-quiz-conf{font-family:var(--mono);font-size:12px;color:var(--route)}
+.sp-quiz-full{margin:2px 0 0;font-size:12.5px;color:var(--ink-soft)}
+.sp-why{margin:9px 0 0;font-size:13.5px;line-height:1.6;color:var(--ink);
+  padding-left:11px;border-left:2px solid var(--signal)}
+.sp-quiz-tvl{display:block;margin-top:10px}
+.sp-quiz-section{display:block;margin:20px 0 8px}
+
+/* every strand, with the reason on its own row beneath the bar */
+.sp-quiz-ranked{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.sp-quiz-ranked li{display:grid;grid-template-columns:minmax(64px,auto) 1fr auto;align-items:center;
+  gap:10px 10px}
+.sp-quiz-rlabel{font-size:13px;font-weight:600}
+.sp-quiz-rpct{font-family:var(--mono);font-size:12px;color:var(--ink-soft)}
+.sp-quiz-reason{grid-column:1/-1;margin:0;font-size:12.5px;line-height:1.55;color:var(--ink-soft)}
+/* the compare strip pins its bar to column 1 on narrow screens; these rows are
+   a three-column grid at every width, so opt out of that. */
+.sp-quiz-ranked .sp-compare-track{grid-column:auto}
+
+/* careers the answers point to */
+.sp-joblist{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.sp-job{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:12px 13px}
+.sp-job-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.sp-job-title{font-weight:700;font-size:14.5px}
+.sp-job-pct{font-family:var(--mono);font-size:12px;color:var(--route)}
+.sp-job .sp-badges{margin:8px 0 0}
+.sp-job .sp-quiz-reason{margin-top:8px}
+.sp-quiz-result .sp-fineprint{margin-top:16px}
 
 /* career match: compare strip, filters, badges */
 .sp-compare{background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:15px 16px;margin-bottom:14px}

@@ -14,6 +14,7 @@ src/main.jsx                    React entry point
 src/SmartPath.jsx               the whole app (UI, styles, logic)
 src/data/places.js              Philippine cities, provinces and schools
 src/index.css                   minimal page reset
+src/lib/recommend.js            local strand + career scoring (no network)
 netlify/functions/chat.mjs      Anthropic endpoint (holds the API key)
 vite.config.js                  build config + /api/chat middleware for `npm run dev`
 netlify.toml                    build, routing and header config for Netlify
@@ -61,6 +62,53 @@ Two cities are named San Fernando, so both are listed under their official
 name with the province in brackets — `City of San Fernando (La Union)` and
 `City of San Fernando (Pampanga)` — and each has its own school group. They
 sort under "C", but typing "san fernando" finds either one.
+
+### Strand and career match
+
+The **Career match** tab opens with an eight-question form — seven 1-5 interest
+ratings and one activity — scored by `src/lib/recommend.js` **in the browser**.
+No network call, no model, no key: the same answers always produce the same
+result, and it works offline.
+
+All five strands come back ranked with a match percentage and a reason written
+from the student's own answers ("You rated Math (very much), Science (very
+much) and Technology (a lot), and those carry the most weight for STEM"),
+followed by the careers those answers point to, each with its own percentage,
+route badge and reason.
+
+**How the scoring works.** Each strand carries weights over the seven traits —
+STEM leans on maths, science and technology; ABM on business, communication and
+maths; and so on. A strand's score blends two things:
+
+- **absolute** — how highly the student rated the traits that strand needs
+- **relative** — how far those traits sit *above the student's own average*
+
+The second half matters. Someone who rates everything 5 would "fit" every
+strand on absolute interest alone, which tells them nothing; the relative term
+is what separates a genuine preference from blanket enthusiasm.
+
+**GAS is scored differently on purpose.** It is the strand for students who
+have not narrowed down yet, so it rewards an *even* spread rather than a peak:
+the flatter and more uniformly interested the answers, the better GAS fits.
+Weighting it like the others would make it a weak copy of whichever strand was
+nearest.
+
+The eighth question is a nudge worth at most twelve points — enough to separate
+two close strands, never enough to overturn seven considered ratings.
+
+Careers score the same way against the traits the work actually uses, then
+blend in the fit of the strand they sit under (70/30) so the career list cannot
+contradict the strand result. `route` — `degree`, `short` (TESDA or a
+certificate) or `work` — is shown as a badge, so a student who cannot go
+straight to college can see their options.
+
+**TVL is left to the student.** A TVL result shows the score and a note but no
+apply button, because the profile splits TVL into four tracks and picking one
+would be inventing an answer the questionnaire did not ask for.
+
+To adjust the model, edit the weights in `src/lib/recommend.js` — `STRANDS[].weights`,
+`ACTIVITIES[].bonus` and `CAREERS[].weights` are the whole of it. Nothing else
+needs to change.
 
 ### Career match
 
