@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { PH_LOCATIONS, PH_SCHOOLS, schoolsForCity } from "./data/places.js";
-import { ACTIVITIES, ACTIVITY_VALUES, TRAITS, applyFeedback, emptyAdjustments, recommend }
-  from "./lib/recommend.js";
+import { ACTIVITIES, ACTIVITY_VALUES, TRAITS, applyFeedback, emptyAdjustments,
+  localCareerCards, recommend } from "./lib/recommend.js";
 
 /* ==========================================================
    SmartPath — AI-Powered Career Guidance & Resume Builder
@@ -1153,6 +1153,7 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mapBusy, setMapBusy] = useState(false);
+  const [usedLocal, setUsedLocal] = useState(false);
   const [onlyNoDegree, setOnlyNoDegree] = useState(false);
 
   /* Best fit first, and whichever path the student picked stays pinned at the
@@ -1185,12 +1186,33 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
       const list = Array.isArray(out.careers) ? out.careers.slice(0, 4) : [];
       if (!list.length) throw new Error("No careers came back.");
       setCareers(list);
+      setUsedLocal(false);
       /* If the path they had chosen is not in the new set, clear the choice
          rather than leaving the resume pointed at a career that is gone. */
       const stillThere = list.some((c) => c.title === chosen);
       if (chosen && !stillThere) setChosen("");
       await save({ careers: list, chosen: stillThere ? chosen : "" });
-    } catch (e) { setError(e.message || "Something went wrong reaching the AI service."); }
+    } catch (e) {
+      /* The AI pass is the richer one, but it is not the only one. Rather
+         than leave the tab empty when it cannot be reached, fall back to the
+         local engine's ranking — clearly labelled, so nobody mistakes the
+         offline suggestions for the personalised ones. */
+      const answered = ACTIVITY_VALUES.includes(quiz.preferred_activity);
+      if (answered) {
+        const local = localCareerCards(quiz, { adjustments });
+        setCareers(local);
+        setUsedLocal(true);
+        const stillThere = local.some((c) => c.title === chosen);
+        if (chosen && !stillThere) setChosen("");
+        await save({ careers: local, chosen: stillThere ? chosen : "" });
+        setError("");
+      } else {
+        setError(
+          (e.message || "Something went wrong reaching the AI service.") +
+            " Answer the eight questions above and SmartPath will rank careers on this device instead."
+        );
+      }
+    }
     setBusy(false);
   }
 
@@ -1237,6 +1259,14 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
 
       {careers.length ? (
         <>
+          {usedLocal || careers.some((c) => c.local) ? (
+            <p className="sp-local-note">
+              <b>Ranked on this device.</b> The AI service could not be reached, so these come from
+              SmartPath's own scoring of your eight answers — the same engine as the strand result
+              above, with your feedback folded in. Run the match again when you are back online for
+              the version written around your profile.
+            </p>
+          ) : null}
           {/* All four side by side, so the comparison is one glance rather than
               a scroll through four cards. */}
           <section className="sp-compare">
@@ -1302,19 +1332,21 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
 
             <p className="sp-why">{c.why}</p>
 
+            {/* A heading with nothing under it reads as broken, so each set
+                only appears when it has something to show. */}
             <div className="sp-chipsets">
-              <div>
-                <span className="sp-chip-label">Study this</span>
-                <div className="sp-chips">{(c.courses || []).map((x, j) => <span key={j} className="sp-chip">{x}</span>)}</div>
-              </div>
-              <div>
-                <span className="sp-chip-label">Build these skills</span>
-                <div className="sp-chips">{(c.skills || []).map((x, j) => <span key={j} className="sp-chip sp-chip-alt">{x}</span>)}</div>
-              </div>
-              <div>
-                <span className="sp-chip-label">First jobs</span>
-                <div className="sp-chips">{(c.firstJobs || []).map((x, j) => <span key={j} className="sp-chip">{x}</span>)}</div>
-              </div>
+              {[["Study this", c.courses, "sp-chip"],
+                ["Build these skills", c.skills, "sp-chip sp-chip-alt"],
+                ["First jobs", c.firstJobs, "sp-chip"]].map(([label, items, cls]) =>
+                (items || []).length ? (
+                  <div key={label}>
+                    <span className="sp-chip-label">{label}</span>
+                    <div className="sp-chips">
+                      {items.map((x, j) => <span key={j} className={cls}>{x}</span>)}
+                    </div>
+                  </div>
+                ) : null
+              )}
             </div>
 
             {c.reality ? <p className="sp-reality">Worth knowing: {c.reality}</p> : null}
@@ -2421,6 +2453,11 @@ function Styles() {
 .sp-steps b{font-family:var(--mono);font-size:12px}
 .sp-steps-note{list-style:none;margin-left:-18px;color:var(--ink-soft);font-size:12px}
 p.sp-steps-note{margin:10px 0 0;padding:0;font-size:12px;line-height:1.6;color:var(--ink-soft)}
+
+.sp-local-note{font-size:13px;line-height:1.6;color:var(--ink-soft);margin:0 0 14px;
+  padding:11px 13px;background:var(--chip);border:1px solid var(--line);
+  border-left:3px solid var(--signal);border-radius:4px}
+.sp-local-note b{color:var(--ink)}
 
 /* career match: compare strip, filters, badges */
 .sp-compare{background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:15px 16px;margin-bottom:14px}

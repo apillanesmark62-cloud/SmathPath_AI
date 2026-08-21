@@ -157,6 +157,24 @@ the explanation ever drifts from the calculation, the tests fail.
 
 ### Career match
 
+Two engines, not one. The **local** engine above scores instantly on the
+device; **Match me to careers** additionally asks Anthropic for a set written
+around what the student typed in their profile, which is the richer answer
+when it is available.
+
+**If Anthropic cannot be reached, the tab does not go empty.** The failure
+falls through to `localCareerCards()` — the same scoring as the strand
+result, with the student's feedback folded in — rendered in the same cards,
+with a note saying where they came from so nobody mistakes offline
+suggestions for the personalised ones. Choosing one still drives the resume,
+the roadmap and interview prep exactly as an AI suggestion would, and the
+banner clears the moment a later match succeeds.
+
+The only case that cannot fall back is a student who has not answered the
+eight questions yet; they get a message pointing at the questionnaire rather
+than a dead end. `ANTHROPIC_API_KEY` remains the only variable the app needs,
+and nothing about the local engine depends on it.
+
 Suggestions are sorted best-fit first, with the path the student chose pinned
 to the top. Each card carries a fit label (Strong fit / Good fit / Worth
 exploring) and a route badge, and a compare strip above the cards puts all four
