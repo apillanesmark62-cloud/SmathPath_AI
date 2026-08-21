@@ -11,7 +11,6 @@ import react from "@vitejs/plugin-react";
    browser. */
 const API_ROUTES = [
   { path: "/api/chat", module: "netlify/functions/chat.mjs", handler: "handleChat" },
-  { path: "/api/classify", module: "netlify/functions/classify.mjs", handler: "handleClassify" },
 ];
 
 function apiDevServer() {
@@ -74,10 +73,7 @@ export default defineConfig(({ mode }) => {
      handlers. The third argument is "" so unprefixed variables are read too;
      nothing here is passed to the client bundle. */
   const env = loadEnv(mode, process.cwd(), "");
-  for (const key of ["ANTHROPIC_API_KEY", "AUTOTRAIN_URL", "AUTOTRAIN_EMAIL", "AUTOTRAIN_PASSWORD",
-                     "AUTOTRAIN_REFRESH_TOKEN", "AUTOTRAIN_FIREBASE_API_KEY",
-                     "AUTOTRAIN_FIREBASE_APIKEY", "AUTOTRAIN_SIGNIN_ENDPOINT", "AUTOTRAIN_APP_URL",
-                     "AUTOTRAIN_TOKEN_ENDPOINT"]) {
+  for (const key of ["ANTHROPIC_API_KEY"]) {
     if (!process.env[key] && env[key]) process.env[key] = env[key];
   }
 

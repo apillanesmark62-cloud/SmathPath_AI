@@ -13,12 +13,6 @@
   status = 200
   force = true
 
-[[redirects]]
-  from = "/api/classify"
-  to = "/.netlify/functions/classify"
-  status = 200
-  force = true
-
 # Single-page app: every other path serves index.html.
 [[redirects]]
   from = "/*"

@@ -719,381 +719,6 @@ function ProfileTab({ profile, setProfile, onSaved, goMatch }) {
   );
 }
 
-/* ---------------- strand classifier ---------------- */
-/* The eight features the AutoTrain model was trained on. The seven ratings are
-   1-5; preferred_activity is a category. Keep this list and the ACTIVITIES
-   list below in step with netlify/functions/classify.mjs. */
-const CLASSIFIER_QUESTIONS = [
-  { key: "math_interest", label: "Math", hint: "Numbers, patterns, problem sets" },
-  { key: "science_interest", label: "Science", hint: "Experiments, how things work" },
-  { key: "business_interest", label: "Business", hint: "Selling, money, running things" },
-  { key: "communication_interest", label: "Communication", hint: "Writing, speaking, persuading" },
-  { key: "technology_interest", label: "Technology", hint: "Computers, apps, systems" },
-  { key: "creative_interest", label: "Creative work", hint: "Drawing, design, music, video" },
-  { key: "hands_on_interest", label: "Hands-on work", hint: "Building, repairing, cooking, machines" },
-];
-
-/* The student sees `label`; the model receives `value`. AutoTrain's
-   preferred_activity column holds snake_case categories — the working sample
-   uses "public_speaking".
-
-   ⚠ Only "public_speaking" is confirmed. The other six follow the same
-   convention but are NOT verified against the training data, and a decision
-   tree given an unseen category mispredicts silently rather than erroring. If
-   they differ from your dataset, fix them here and in ACTIVITIES in
-   netlify/functions/classify.mjs. */
-const CLASSIFIER_ACTIVITIES = [
-  { value: "solving_math_problems", label: "Solving math problems" },
-  { value: "doing_science_experiments", label: "Doing science experiments" },
-  { value: "running_a_business", label: "Running a small business" },
-  { value: "public_speaking", label: "Speaking or presenting" },
-  { value: "working_with_computers", label: "Working with computers" },
-  { value: "drawing_or_designing", label: "Drawing or designing" },
-  { value: "building_or_repairing", label: "Building or repairing things" },
-];
-
-const ACTIVITY_VALUES = CLASSIFIER_ACTIVITIES.map((a) => a.value);
-
-const RATING_WORDS = ["Not at all", "A little", "Somewhat", "A lot", "Very much"];
-
-const blankQuiz = {
-  math_interest: 3,
-  science_interest: 3,
-  business_interest: 3,
-  communication_interest: 3,
-  technology_interest: 3,
-  creative_interest: 3,
-  hands_on_interest: 3,
-  preferred_activity: "",
-};
-
-/* The model's classes are ABM, GAS, HUMSS, STEM and TVL, while the profile
-   dropdown splits TVL into four tracks. Line the others up so the prediction
-   can be applied in one click; a bare "TVL" stays unmatched on purpose, since
-   picking a track for the student would be inventing an answer the model did
-   not give. */
-const STRAND_OPTIONS = [
-  "STEM", "ABM", "HUMSS", "GAS",
-  "TVL — Home Economics", "TVL — ICT", "TVL — Industrial Arts", "TVL — Agri-Fishery",
-  "Arts and Design", "Sports",
-];
-
-function matchStrandOption(label) {
-  const key = String(label || "").trim().toLowerCase();
-  if (!key) return null;
-  /* "TVL" alone covers four different tracks — leave it for the student. */
-  if (key === "tvl") return null;
-  const exact = STRAND_OPTIONS.find((o) => o.toLowerCase() === key);
-  if (exact) return exact;
-  const loose = STRAND_OPTIONS.find(
-    (o) => o.toLowerCase().replace(/[^a-z]/g, "") === key.replace(/[^a-z]/g, "")
-  );
-  return loose || null;
-}
-
-/* Lay the endpoint's trace out as plain text: what went to AutoTrain, what
-   came back, and what the function's own configuration looked like. Rendered
-   in the page and copied verbatim by the Copy button, so a failure can be
-   read — or pasted somewhere useful — without opening the serverless log. */
-function diagText(message, diag) {
-  if (!diag) return message || "";
-  const out = [];
-  out.push(message || "");
-  if (diag.hint) {
-    out.push("");
-    out.push(diag.hint);
-  }
-  out.push("");
-
-  const env = diag.env;
-  if (env) {
-    out.push("ENVIRONMENT (as the deployed function sees it)");
-    const line = (name) => {
-      const v = env[name];
-      if (!v) return "  " + name + ": unknown";
-      if (!v.set) return "  " + name + ": NOT SET" + (v.using ? " — " + v.using : "");
-      if (typeof v.value === "string") return "  " + name + ": SET = " + v.value;
-      return "  " + name + ": SET" + (v.note ? " — " + v.note : v.as ? " (as " + v.as + ")" : "");
-    };
-    out.push(line("AUTOTRAIN_URL"));
-    out.push(line("AUTOTRAIN_EMAIL"));
-    out.push(line("AUTOTRAIN_PASSWORD"));
-    out.push(line("AUTOTRAIN_FIREBASE_API_KEY"));
-    /* Only worth a line when configured — neither is required any more. */
-    if (env.AUTOTRAIN_REFRESH_TOKEN) out.push(line("AUTOTRAIN_REFRESH_TOKEN"));
-    if (env.AUTOTRAIN_API_KEY) out.push(line("AUTOTRAIN_API_KEY"));
-
-    /* The token itself is never sent here — only whether one was attached and
-       how much life it had left, which is what a 401 turns on. */
-    const t = env.bearer_token;
-    if (t && t.set) {
-      let note = "  bearer token: SENT (from " + (t.source || "configuration") + ")";
-      if (t.expires_at) {
-        note += t.expired
-          ? " — EXPIRED at " + t.expires_at
-          : " — valid for another " + t.minutes_left + " min (until " + t.expires_at + ")";
-      }
-      out.push(note);
-    } else {
-      out.push("  bearer token: NONE SENT");
-    }
-    if (env.deploy) {
-      Object.entries(env.deploy).forEach(([k, v]) => out.push("  " + k + ": " + v));
-    }
-    if (env.visible_variables) {
-      out.push(
-        "  variables this function can see: " +
-          (env.visible_variables.length ? env.visible_variables.join(", ") : "(none)")
-      );
-    }
-    if (env.credential_error) out.push("  credential problem: " + env.credential_error);
-    if (env.node) out.push("  node: " + env.node);
-    out.push("");
-  }
-
-  (diag.trace || []).forEach((step, i) => {
-    out.push("ATTEMPT " + (i + 1) + " — " + step.shape + " — " + (step.outcome || "no result"));
-    const req = step.request || {};
-    out.push("  " + (req.method || "POST") + " " + (req.url || ""));
-    Object.entries(req.headers || {}).forEach(([k, v]) => out.push("  " + k + ": " + v));
-    out.push("  body: " + (req.body || ""));
-    const res = step.response;
-    if (res) {
-      out.push("  --> HTTP " + res.status + " " + (res.status_text || ""));
-      out.push("  --> content-type: " + (res.content_type || "none"));
-      Object.entries(res.headers || {}).forEach(([k, v]) => {
-        if (k.toLowerCase() !== "content-type") out.push("  --> " + k + ": " + v);
-      });
-      out.push("  --> body (" + res.body_length + " chars, before JSON parsing" +
-        (res.body_truncated ? ", truncated" : "") + "):");
-      out.push("  " + (res.body_text || "(empty)"));
-      if (res.parse_error) out.push("  --> not valid JSON: " + res.parse_error);
-    } else if (step.error) {
-      out.push("  --> no response: " + step.error);
-    }
-    out.push("");
-  });
-
-  return out.join("\n").trim();
-}
-
-function StrandClassifier({ quiz, setQuiz, result, setResult, profile, setProfile, save }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [diag, setDiag] = useState(null);
-  const [hint, setHint] = useState("");
-  const [showDiag, setShowDiag] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [open, setOpen] = useState(false);
-
-  /* Work saved before the options carried model values holds prose like
-     "Writing or speaking", which the model would reject. Treat anything
-     that is not a current value as unanswered. */
-  const activity = ACTIVITY_VALUES.includes(quiz.preferred_activity) ? quiz.preferred_activity : "";
-  const answered = !!activity;
-
-  function set(key, value) {
-    const next = { ...quiz, [key]: value };
-    setQuiz(next);
-    setResult(null);
-  }
-
-  async function submit() {
-    if (!answered) {
-      setError("Pick the activity you would rather do before submitting.");
-      return;
-    }
-    setBusy(true);
-    setError("");
-    setDiag(null);
-    setHint("");
-    setShowDiag(false);
-    setCopied(false);
-    try {
-      const res = await fetch("/api/classify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answers: { ...quiz, preferred_activity: activity } }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        /* The endpoint sends AutoTrain's own words as `error`, plus a trace of
-           every live request and reply. Keep both: the message is shown as-is,
-           and the trace goes behind a toggle so the exact status, headers and
-           raw body can be read here instead of only in the serverless log. */
-        if (data && (data.trace || data.env)) {
-          setDiag({ trace: data.trace || [], env: data.env || null, hint: data.hint || "", status: res.status });
-        }
-        if (data && data.hint) setHint(data.hint);
-        throw new Error((data && data.error) || "The classifier endpoint returned status " + res.status + ".");
-      }
-      setResult(data);
-      await save({ quiz, quizResult: data });
-    } catch (e) {
-      setError(e.message || "Could not reach the classifier.");
-    }
-    setBusy(false);
-  }
-
-  async function copyDiag() {
-    try {
-      await navigator.clipboard.writeText(diagText(error, diag));
-      setCopied(true);
-    } catch (e) {
-      setCopied(false);
-    }
-  }
-
-  const suggested = result ? matchStrandOption(result.strand) : null;
-  const applied = suggested && profile.strand === suggested;
-
-  return (
-    <section className="sp-quiz">
-      <button className="sp-quiz-head" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <div>
-          <span className="sp-chip-label">Strand classifier</span>
-          <h3 className="sp-quiz-title">Which strand suits you?</h3>
-          <p className="sp-quiz-sub">
-            {result
-              ? "The model suggests " + result.strand + ". Open to change your answers."
-              : "Eight quick questions, scored by SmartPath's trained model."}
-          </p>
-        </div>
-        <span className={"sp-quiz-caret" + (open ? " is-open" : "")}>
-          <Icon name="caret" size={18} />
-        </span>
-      </button>
-
-      {open ? (
-        <div className="sp-quiz-body">
-          {CLASSIFIER_QUESTIONS.map((q) => (
-            <div key={q.key} className="sp-rating">
-              <div className="sp-rating-top">
-                <span className="sp-rating-label">{q.label}</span>
-                <span className="sp-rating-word">{RATING_WORDS[quiz[q.key] - 1]}</span>
-              </div>
-              <div className="sp-rating-scale" role="radiogroup" aria-label={q.label}>
-                {[1, 2, 3, 4, 5].map((n) => (
-                  <button
-                    key={n}
-                    role="radio"
-                    aria-checked={quiz[q.key] === n}
-                    aria-label={RATING_WORDS[n - 1]}
-                    className={"sp-rating-dot" + (quiz[q.key] === n ? " is-on" : "")}
-                    onClick={() => set(q.key, n)}
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-              <span className="sp-hint">{q.hint}</span>
-            </div>
-          ))}
-
-          <Field label="Which would you rather do?" hint="Pick the one closest to how you like to spend time.">
-            <select
-              className="sp-input"
-              value={activity}
-              onChange={(e) => set("preferred_activity", e.target.value)}
-            >
-              <option value="">Choose one…</option>
-              {CLASSIFIER_ACTIVITIES.map((a) => (
-                <option key={a.value} value={a.value}>{a.label}</option>
-              ))}
-            </select>
-          </Field>
-
-          <Notice kind="error" onRetry={error ? submit : null}>{error}</Notice>
-          {hint ? <p className="sp-diag-hint">{hint}</p> : null}
-          {diag ? (
-            <div className="sp-diag">
-              <div className="sp-diag-bar">
-                <button className="sp-diag-toggle" onClick={() => setShowDiag(!showDiag)}>
-                  {showDiag ? "Hide" : "Show"} the request and reply
-                  {diag.trace.length > 1 ? " (" + diag.trace.length + " attempts)" : ""}
-                </button>
-                <button className="sp-diag-toggle" onClick={copyDiag}>
-                  {copied ? "Copied" : "Copy"}
-                </button>
-              </div>
-              {showDiag ? <pre className="sp-diag-body">{diagText(error, diag)}</pre> : null}
-            </div>
-          ) : null}
-
-          <div className="sp-actions">
-            <button className="sp-btn sp-btn-primary" onClick={submit} disabled={busy || !answered}>
-              {busy ? "Scoring…" : result ? "Score again" : "See my strand"}
-            </button>
-            {!answered ? <span className="sp-hint">Pick an activity to finish.</span> : null}
-          </div>
-          {busy ? <Loading label="Sending your answers to the model…" /> : null}
-        </div>
-      ) : null}
-
-      {result ? (
-        <div className="sp-quiz-result sp-fade">
-          <div className="sp-quiz-verdict">
-            <span className="sp-chip-label">Predicted strand</span>
-            <strong className="sp-quiz-strand">{result.strand}</strong>
-            {typeof result.confidence === "number" ? (
-              <span className="sp-quiz-conf">{Math.round(result.confidence * 100)}% confidence</span>
-            ) : null}
-          </div>
-
-          {(result.ranked || []).length > 1 ? (
-            <ul className="sp-quiz-ranked">
-              {result.ranked.map((r) => (
-                <li key={r.label}>
-                  <span className="sp-quiz-rlabel">{r.label}</span>
-                  <span className="sp-compare-track">
-                    <span
-                      className="sp-compare-fill"
-                      style={{ width: Math.round(Math.max(0, Math.min(1, r.score || 0)) * 100) + "%" }}
-                    />
-                  </span>
-                  <span className="sp-compare-num">
-                    {typeof r.score === "number" ? Math.round(r.score * 100) : "—"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {!suggested && String(result.strand).trim().toUpperCase() === "TVL" ? (
-            <p className="sp-reality">
-              TVL covers four tracks in your profile — Home Economics, ICT, Industrial Arts and
-              Agri-Fishery. Open <strong>Your profile</strong> and pick the one closest to what you want to do.
-            </p>
-          ) : null}
-
-          {suggested ? (
-            <div className="sp-actions">
-              <button
-                className="sp-btn sp-btn-small"
-                disabled={applied}
-                onClick={async () => {
-                  const next = { ...profile, strand: suggested };
-                  setProfile(next);
-                  await save({ profile: next });
-                }}
-              >
-                {applied ? "Saved to your profile" : "Use " + suggested + " in my profile"}
-              </button>
-            </div>
-          ) : null}
-
-          <p className="sp-fineprint">
-            {result.algorithm
-              ? "This is a " + result.algorithm + " prediction from a model trained on past student answers, not a decision. "
-              : "This is a prediction from a model trained on past student answers, not a decision. "}
-            Your interests and the careers below matter more than one label.
-          </p>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
 /* ---------------- career match ---------------- */
 const ROUTES = {
   degree: "4-year degree",
@@ -1118,7 +743,7 @@ function slug(s) {
 }
 
 function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen, roadmap, setRoadmap,
-  quiz, setQuiz, quizResult, setQuizResult, save, goResume }) {
+  save, goResume }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mapBusy, setMapBusy] = useState(false);
@@ -1191,9 +816,6 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
           interview practice — you can switch any time.
         </p>
       </header>
-
-      <StrandClassifier quiz={quiz} setQuiz={setQuiz} result={quizResult} setResult={setQuizResult}
-        profile={profile} setProfile={setProfile} save={save} />
 
       <Notice kind="error" onRetry={error ? run : null}>{error}</Notice>
       {busy ? <Loading label="Reading your profile and matching careers…" /> : null}
@@ -1857,8 +1479,6 @@ export default function SmartPath() {
   const [prep, setPrep] = useState(null);
   const [scores, setScores] = useState({});
   const [chat, setChat] = useState([]);
-  const [quiz, setQuiz] = useState(blankQuiz);
-  const [quizResult, setQuizResult] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1890,8 +1510,6 @@ export default function SmartPath() {
     setPrep(d.prep || null);
     setScores(d.scores || {});
     setChat(d.chat || []);
-    setQuiz({ ...blankQuiz, ...(d.quiz || {}) });
-    setQuizResult(d.quizResult || null);
     setUser(u);
     setTab("home");
   }
@@ -1901,7 +1519,7 @@ export default function SmartPath() {
     const current = (await store.get("data:" + user)) || {};
     await store.set("data:" + user, {
       ...current, profile, careers, chosen, roadmap, resume,
-      resumeBuilt: built, prep, scores, chat, quiz, quizResult, ...(patch || {}),
+      resumeBuilt: built, prep, scores, chat, ...(patch || {}),
     });
   }
 
@@ -1909,7 +1527,7 @@ export default function SmartPath() {
     await store.set("session", {});
     setUser(null); setProfile(blankProfile); setCareers([]); setChosen("");
     setRoadmap(null); setResume(blankResume); setBuilt(null); setPrep(null);
-    setScores({}); setChat([]); setQuiz(blankQuiz); setQuizResult(null); setTab("home");
+    setScores({}); setChat([]); setTab("home");
   }
 
   const done = {
@@ -1953,7 +1571,6 @@ export default function SmartPath() {
         {tab === "match" ? (
           <MatchTab profile={profile} setProfile={setProfile} careers={careers} setCareers={setCareers}
             chosen={chosen} setChosen={setChosen} roadmap={roadmap} setRoadmap={setRoadmap}
-            quiz={quiz} setQuiz={setQuiz} quizResult={quizResult} setQuizResult={setQuizResult}
             save={save} goResume={() => setTab("resume")} />
         ) : null}
         {tab === "resume" ? (
@@ -2301,55 +1918,6 @@ function Styles() {
 .sp-picker-opt.is-active{background:var(--chip)}
 .sp-picker-opt.is-chosen{color:var(--route);font-weight:600}
 .sp-picker-none{margin:0;padding:14px 13px;font-size:13px;line-height:1.5;color:var(--ink-soft)}
-
-/* strand classifier */
-.sp-quiz{background:var(--card);border:1.5px solid var(--line);border-left:4px solid var(--signal);
-  border-radius:5px;margin-bottom:16px;overflow:hidden}
-.sp-quiz-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;width:100%;
-  background:none;border:none;padding:16px 18px;cursor:pointer;text-align:left;font-family:inherit}
-.sp-quiz-title{font-family:var(--display);font-weight:700;font-size:17px;margin:4px 0 0;color:var(--ink)}
-.sp-quiz-sub{margin:5px 0 0;font-size:13px;line-height:1.5;color:var(--ink-soft)}
-.sp-quiz-caret{color:var(--ink-soft);display:flex;padding-top:14px;transition:transform .18s}
-.sp-quiz-caret.is-open{transform:rotate(180deg);color:var(--route)}
-.sp-quiz-body{padding:0 18px 6px;border-top:1px solid var(--line)}
-.sp-quiz-body .sp-field:first-of-type{margin-top:4px}
-
-.sp-rating{padding:13px 0;border-bottom:1px solid var(--line)}
-.sp-rating-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:8px}
-.sp-rating-label{font-size:14px;font-weight:600}
-.sp-rating-word{font-family:var(--mono);font-size:11px;color:var(--route)}
-.sp-rating-scale{display:flex;gap:6px}
-.sp-rating-dot{flex:1;min-width:0;height:38px;background:var(--card);border:1.5px solid var(--line);
-  border-radius:4px;font-family:var(--mono);font-size:13px;color:var(--ink-soft);cursor:pointer;
-  transition:background .12s,border-color .12s,color .12s}
-.sp-rating-dot:hover{border-color:var(--route)}
-.sp-rating-dot.is-on{background:var(--panel);border-color:var(--panel);color:var(--on-panel)}
-.sp-rating .sp-hint{display:block;margin-top:6px}
-
-.sp-quiz-result{padding:16px 18px;border-top:1px solid var(--line);background:var(--chip)}
-.sp-quiz-verdict{display:flex;align-items:baseline;flex-wrap:wrap;gap:10px}
-.sp-quiz-verdict .sp-chip-label{flex:0 0 100%;margin-bottom:0}
-.sp-quiz-strand{font-family:var(--display);font-weight:800;font-size:24px;letter-spacing:-.01em;color:var(--ink)}
-.sp-quiz-conf{font-family:var(--mono);font-size:12px;color:var(--route)}
-.sp-quiz-ranked{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
-.sp-quiz-ranked li{display:grid;grid-template-columns:minmax(80px,auto) 1fr auto;align-items:center;gap:10px}
-.sp-quiz-rlabel{font-size:13px;font-weight:600}
-/* the upstream's own words, for debugging a failing prediction */
-.sp-diag-hint{font-size:13px;line-height:1.6;color:var(--ink-soft);margin:-4px 0 12px;
-  padding-left:11px;border-left:2px solid var(--line)}
-.sp-diag{margin:-4px 0 12px}
-.sp-diag-bar{display:flex;gap:8px;flex-wrap:wrap}
-.sp-diag-toggle{font-family:var(--mono);font-size:11px;letter-spacing:.04em;text-transform:uppercase;
-  color:var(--ink-soft);background:var(--chip);border:1px solid var(--line);border-radius:3px;
-  padding:6px 10px;cursor:pointer;transition:border-color .12s,color .12s}
-.sp-diag-toggle:hover{border-color:var(--route);color:var(--ink)}
-.sp-diag-body{font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--ink-soft);
-  background:var(--chip);border:1px solid var(--line);border-radius:3px;
-  padding:11px 13px;margin:8px 0 0;max-height:340px;overflow:auto;
-  white-space:pre-wrap;word-break:break-word}
-/* the compare strip pins its bar to column 1 on narrow screens; the ranked
-   list here is a three-column row at every width, so opt out of that. */
-.sp-quiz-ranked .sp-compare-track{grid-column:auto}
 
 /* career match: compare strip, filters, badges */
 .sp-compare{background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:15px 16px;margin-bottom:14px}

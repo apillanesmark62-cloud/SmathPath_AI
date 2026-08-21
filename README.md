@@ -15,8 +15,7 @@ src/SmartPath.jsx               the whole app (UI, styles, logic)
 src/data/places.js              Philippine cities, provinces and schools
 src/index.css                   minimal page reset
 netlify/functions/chat.mjs      Anthropic endpoint (holds the API key)
-netlify/functions/classify.mjs  strand classifier endpoint (calls AutoTrain)
-vite.config.js                  build config + /api/* middleware for `npm run dev`
+vite.config.js                  build config + /api/chat middleware for `npm run dev`
 netlify.toml                    build, routing and header config for Netlify
 ```
 
@@ -73,182 +72,6 @@ of `degree`, `short` (TESDA or a certificate) or `work`, which drives the
 "No 4-year degree needed" filter — so the students who cannot go straight to
 college can find their options in one click.
 
-### Strand classifier
-
-The **Career match** tab opens with an eight-question form scored by the
-AutoTrain Decision Tree model. Seven questions are 1-5 interest ratings and the
-eighth is a category, matching the model's `feature_columns`:
-
-| Feature | Input |
-| --- | --- |
-| `math_interest` | rating, 1-5 |
-| `science_interest` | rating, 1-5 |
-| `business_interest` | rating, 1-5 |
-| `communication_interest` | rating, 1-5 |
-| `technology_interest` | rating, 1-5 |
-| `creative_interest` | rating, 1-5 |
-| `hands_on_interest` | rating, 1-5 |
-| `preferred_activity` | one of seven categories |
-
-Submitting posts to `/api/classify`, which forwards the answers to AutoTrain
-and normalises the reply. The predicted strand is shown with its confidence and
-a bar per class from `probabilities`, and can be written to the student's
-profile in one click. Answers and result are saved with the rest of their work,
-so both survive a reload.
-
-**The wire format.** `netlify/functions/classify.mjs` sends one row under
-`data`:
-
-```json
-POST https://api.autotrain.app/api/autotrain/jobs/<job id>/predict?access=dashboard
-Content-Type: application/json
-
-{ "data": [ { "math_interest": 2, "science_interest": 1, "business_interest": 2,
-              "communication_interest": 5, "technology_interest": 2,
-              "creative_interest": 5, "hands_on_interest": 3,
-              "preferred_activity": "public_speaking" } ] }
-```
-
-and reads `predictions[0].predicted_class` and `predictions[0].confidence_score`
-from the reply, with `probabilities` becoming the ranked bars. A response
-carrying `success: false` is treated as a failure. If the URL's path has no
-trailing slash, a 404 is retried once with one — FastAPI with `redirect_slashes`
-off answers a missing slash with a flat 404 rather than a redirect.
-
-**Prediction is per training job.** The endpoint is not `/api/autotrain` —
-that path answers `404 {"detail":"Not Found"}`, which cost a few rounds to
-work out. The real URL, read off the Testing Console's own network traffic,
-names the job:
-
-```
-POST https://api.autotrain.app/api/autotrain/jobs/<job id>/predict?access=dashboard
-```
-
-The job id is the same value AutoTrain returns as `model_id`. It is compiled
-into `classify.mjs`, so the classifier needs no configuration — but retraining
-issues a **new job id**, and the old URL then 404s. That is the one thing to
-expect to have to change: copy the fresh Request URL from the console and set
-`AUTOTRAIN_URL`.
-
-`?access=dashboard` is carried through verbatim because the console sends it.
-
-**The endpoint requires authentication.** Without a bearer token it answers
-`401 Dashboard authentication is required.` The dashboard sends a **Firebase
-ID token** for the project hosting AutoTrain, and those last exactly one hour.
-
-**So the function signs in for itself.** The AutoTrain account is a Firebase
-email/password account — the dashboard's own ID token carries
-`sign_in_provider: "password"` — and Firebase documents a REST endpoint for
-that:
-
-```
-POST identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=<web api key>
-{ "email": …, "password": …, "returnSecureToken": true }
--> { "idToken": …, "refreshToken": …, "expiresIn": "3600" }
-```
-
-That makes the configurable credential the **AutoTrain login itself** —
-something a person knows — rather than a `refreshToken` that only exists
-inside a signed-in browser's IndexedDB and has to be dug out with DevTools.
-Sign-in also returns a refresh token, so the function renews from that and
-signs in again only when renewing stops working: one sign-in covers many hours
-of predictions.
-
-| Variable | Required | What it is |
-| --- | --- | --- |
-| `AUTOTRAIN_EMAIL` | **yes** | the address you log in to AutoTrain with |
-| `AUTOTRAIN_PASSWORD` | **yes** | that account's password |
-| `AUTOTRAIN_FIREBASE_API_KEY` | no | the project's public web API key |
-| `AUTOTRAIN_REFRESH_TOKEN` | no | still honoured; sign-in does not need it |
-
-**The API key is optional because it is public.** Firebase documents web API
-keys as identifiers rather than secrets — every visitor to the dashboard
-already holds one. When the variable is unset, `classify.mjs` reads it from
-the AutoTrain app's own published bundle and caches it, so a deployment needs
-only the login. Set it to skip that lookup, or if the app changes shape and
-the lookup stops finding it. Either spelling works:
-`AUTOTRAIN_FIREBASE_API_KEY` or `AUTOTRAIN_FIREBASE_APIKEY`.
-
-**Why not a service account?** AutoTrain runs in somebody else's Firebase
-project, so the Admin SDK and service-account credentials are not available to
-us — those belong to whoever operates AutoTrain. `signInWithPassword` is the
-supported server-side path for a *user* of an app, and it is exactly what the
-dashboard's login form does.
-
-**`AUTOTRAIN_API_KEY` and `AUTOTRAIN_AUTH` are gone.** They held an ID token
-pasted out of the browser, which expired an hour later. Delete them from
-Netlify; if either is still set, the diagnostics say so rather than leaving
-you wondering why it changed nothing.
-
-`AUTOTRAIN_PASSWORD` is a real secret — it logs in as you. It belongs in
-Netlify's environment, never in the repository. Nothing about it reaches the
-browser: the client posts to `/api/classify` on your own origin, and the
-diagnostics report only whether each variable is set, never a value.
-
-When a 401 does come back, the panel names the cause — a rejected login, a
-wrong API key, a project with password sign-in disabled — quoting Google's own
-error. If AutoTrain rejects a token the function believed was live (revoked,
-rotated, or the clocks disagree), it discards the cached token, gets another
-and retries once.
-
-`AUTOTRAIN_TOKEN_ENDPOINT` and `AUTOTRAIN_SIGNIN_ENDPOINT` override Google's
-two auth hosts, and `AUTOTRAIN_APP_URL` the page the API key is read from, so
-all three flows can be exercised against a stand-in.
-
-**When AutoTrain refuses the request.** Nothing is summarised away. The error
-line is AutoTrain's own words — `AutoTrain returned 400: Missing required
-field: api_key` — and **Show the request and reply** underneath opens the full
-trace: for every attempt, the URL, the request headers, the exact JSON body
-sent, the HTTP status and status text, every response header, and the response
-body as text *before* any JSON parsing, plus a note if it did not parse. Above
-that sits what the deployed function can see of its own configuration, so
-whether `AUTOTRAIN_URL` actually reached the environment is a fact on the
-page rather than a guess. **Copy** puts the whole thing on the clipboard.
-
-The same trace goes to the Netlify function log, tagged `[classify] REQUEST`
-and `[classify] RESPONSE`.
-
-Credentials are the one thing never echoed — the trace reports only whether
-each is set, and the header shows as `Bearer <redacted>`. The bearer token is
-described by its expiry rather than its value. The URL is not a credential
-(AutoTrain returns the job id in its own replies), so it is shown in full,
-which is the only way to confirm the value the deployment actually holds.
-
-A reply that is HTML rather than JSON is named as such, with its `<title>` —
-the endpoint sits behind Cloudflare, and an edge block is an HTML page, so
-quoting 300 characters of markup would read as noise.
-
-The request body is never varied. The Testing Console's body is known to work,
-so `classify.mjs` sends exactly that and nothing else. The only retry is a
-trailing slash on a 404, because a FastAPI app with `redirect_slashes` off
-answers a missing slash with a flat 404 instead of a redirect.
-
-To hunt for the right path from a machine that can reach the endpoint:
-
-```bash
-npm run probe:autotrain
-```
-
-It asks the server for its OpenAPI route list, then posts the real body to the
-paths a prediction endpoint usually occupies, printing status, headers and body
-for each.
-
-**⚠ Activity categories are only partly confirmed.** `preferred_activity` is a
-snake_case category. `public_speaking` is verified — it is the value in the
-working sample. The other six follow the same convention but have **not** been
-checked against the training data. A decision tree given a category it never
-saw in training mispredicts silently rather than erroring, so if these differ
-from your dataset's column values, correct them in both places:
-`ACTIVITIES` in `netlify/functions/classify.mjs` and `CLASSIFIER_ACTIVITIES`
-in `src/SmartPath.jsx`. The student sees the `label`; the model receives the
-`value`.
-
-**TVL is left to the student.** The model's classes are ABM, GAS, HUMSS, STEM
-and TVL, but the profile splits TVL into four tracks (Home Economics, ICT,
-Industrial Arts, Agri-Fishery). A `TVL` prediction therefore shows the result
-and a note, without an apply button — picking a track for the student would be
-inventing an answer the model did not give.
-
 ## Running it locally
 
 ```bash
@@ -282,24 +105,17 @@ npm run preview    # serve dist/ (static only — /api/chat is not available her
    | Key | Value |
    | --- | --- |
    | `ANTHROPIC_API_KEY` | your key from console.anthropic.com |
-   | `AUTOTRAIN_EMAIL` | the address you log in to AutoTrain with |
-   | `AUTOTRAIN_PASSWORD` | that account's password |
 
-   The classifier's endpoint is compiled into `classify.mjs`; those two are
-   what stop it answering 401, and the function signs in and renews its own
-   token from there. Set `AUTOTRAIN_URL` as well when the model is retrained
-   and the job id changes. See **Strand classifier** above.
+   That is the only variable the app needs.
 
 4. Deploy. Redeploy after adding the variable if you added it post-build.
 
 ## How the API key is protected
 
-The browser never sees a key. It posts to `/api/chat` and `/api/classify` on
-your own origin; Netlify routes those to `netlify/functions/chat.mjs` and
-`netlify/functions/classify.mjs`, which read their credentials from the server
-environment and call Anthropic and AutoTrain. Keeping the AutoTrain call
-server-side also means the browser is never subject to that host's CORS policy,
-and a key can be added later without touching client code.
+The browser never sees the key. It posts to `/api/chat` on your own origin;
+Netlify routes that to `netlify/functions/chat.mjs`, which reads the key from
+the server environment and calls Anthropic. The browser is therefore never
+subject to Anthropic's CORS policy either.
 
 Two things keep it that way:
 
@@ -314,11 +130,6 @@ To confirm after a build, search `dist/` — there should be no key and no
 ```bash
 npm run build && grep -ri "sk-ant\|api.anthropic.com\|Bearer " dist/ ; echo "exit $? (1 = clean)"
 ```
-
-Variable *names* such as `AUTOTRAIN_EMAIL` do appear in the bundle, and that is
-correct: the diagnostics panel labels the rows that report whether each is set.
-Names, never values — the values only ever exist in the serverless function's
-environment.
 
 The endpoint also pins the model server-side, validates the request shape, caps
 message count and length, and applies a best-effort per-IP rate limit. That
