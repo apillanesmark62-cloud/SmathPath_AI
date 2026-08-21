@@ -23,6 +23,19 @@
 
    Every number a student sees can be traced back to answers they gave,
    which is what makes the explanations honest rather than decorative.
+
+   Two things sit on top of that base model:
+
+   - An adjustment layer. The weights below are the starting model, never
+     mutated. A student's feedback ("this fits me", "not for me") is stored
+     as deltas against them, so the base is always visible beside the
+     adjusted value and can be reset in one click.
+
+   - A trace. Every score returned carries the arithmetic that produced it —
+     each trait's rating, its weight, its contribution, the subtotals and
+     the formula — so the result can be checked by hand rather than taken on
+     trust. `verifyTrace` re-adds the trace and confirms it reproduces the
+     score, which keeps the explanation honest as the code changes.
    ========================================================== */
 
 export const TRAITS = [
@@ -104,6 +117,139 @@ export const STRANDS = [
 
 const STRAND_BY_ID = Object.fromEntries(STRANDS.map((s) => [s.id, s]));
 
+/* ---------------- the adjustment layer ----------------
+
+   Feedback never overwrites the model above. It accumulates deltas here,
+   which are added to the base weights at scoring time. That keeps three
+   things true at once: the starting model stays inspectable, any adjusted
+   weight can be shown as "3.0 -> 3.4 (+0.4 from your feedback)", and
+   resetting is deleting the deltas rather than rebuilding anything. */
+
+/* How far one piece of feedback may move a weight. Small on purpose: a
+   student should see the ranking respond, not lurch. */
+export const LEARNING_RATE = 0.35;
+
+/* A weight may drift to at most double its base plus one, and never below
+   zero, so no amount of clicking can make a trait dominate or vanish. */
+function boundWeight(base, adjusted) {
+  const ceiling = base * 2 + 1;
+  return adjusted < 0 ? 0 : adjusted > ceiling ? ceiling : adjusted;
+}
+
+/* A per-career nudge, for when the traits look right but the student still
+   says no. Deliberately small: the weights are what the explanation is built
+   on, so a bias large enough to reorder the list on its own would make the
+   maths panel misleading. One click is worth about a point and a half. */
+const BIAS_STEP = 0.015;
+const MAX_BIAS = 0.08;
+
+export function emptyAdjustments() {
+  return { strandWeights: {}, careerWeights: {}, careerBias: {}, history: [] };
+}
+
+function safeAdjustments(adj) {
+  const base = emptyAdjustments();
+  if (!adj || typeof adj !== "object") return base;
+  return {
+    strandWeights: adj.strandWeights || {},
+    careerWeights: adj.careerWeights || {},
+    careerBias: adj.careerBias || {},
+    history: Array.isArray(adj.history) ? adj.history : [],
+  };
+}
+
+/* Base weights plus this student's deltas, with the base kept alongside so
+   the explanation can show both. */
+function effectiveWeights(baseWeights, deltas) {
+  const out = {};
+  const keys = new Set([...Object.keys(baseWeights || {}), ...Object.keys(deltas || {})]);
+  for (const key of keys) {
+    const base = baseWeights[key] || 0;
+    const delta = (deltas && deltas[key]) || 0;
+    out[key] = { base, delta, value: boundWeight(base, base + delta) };
+  }
+  return out;
+}
+
+const plainWeights = (eff) => Object.fromEntries(Object.entries(eff).map(([k, v]) => [k, v.value]));
+
+/* Learning rule.
+
+   A student who says a career fits is telling us the traits that career
+   leans on matter more to them than the base model assumed — and the
+   evidence is strongest for the traits they themselves rated highly. So each
+   weight moves by rate x signal x their own rating for that trait, scaled by
+   how much the career leans on it. Saying "not for me" moves the same
+   weights the other way.
+
+   The career's strand gets half the same movement, because endorsing a
+   career is partial evidence about the family it belongs to, not proof.
+
+   Nothing here is random and nothing depends on other students: the same
+   answers and the same feedback always produce the same weights. */
+export function applyFeedback(adjustments, feedback) {
+  const next = safeAdjustments(adjustments);
+  const { kind, id, signal, answers } = feedback || {};
+  if (!id || (signal !== 1 && signal !== -1)) return next;
+
+  const r01 = normalise(answers);
+  const bump = (bucket, key, trait, amount) => {
+    bucket[key] = bucket[key] || {};
+    bucket[key][trait] = (bucket[key][trait] || 0) + amount;
+  };
+
+  if (kind === "career") {
+    const career = CAREERS.find((c) => c.title === id);
+    if (!career) return next;
+    const peak = Math.max(...Object.values(career.weights));
+    for (const [trait, w] of Object.entries(career.weights)) {
+      const step = LEARNING_RATE * signal * r01[trait] * (w / peak);
+      bump(next.careerWeights, id, trait, step);
+      bump(next.strandWeights, career.strand, trait, step * 0.5);
+    }
+    const bias = (next.careerBias[id] || 0) + BIAS_STEP * signal;
+    next.careerBias[id] = Math.max(-MAX_BIAS, Math.min(MAX_BIAS, bias));
+  } else if (kind === "strand") {
+    const strand = STRAND_BY_ID[id];
+    if (!strand || !strand.weights) return next;
+    const peak = Math.max(...Object.values(strand.weights));
+    for (const [trait, w] of Object.entries(strand.weights)) {
+      bump(next.strandWeights, id, trait, LEARNING_RATE * signal * r01[trait] * (w / peak));
+    }
+  } else {
+    return next;
+  }
+
+  next.history = next.history.concat([{
+    at: new Date().toISOString(),
+    kind,
+    id,
+    signal,
+    answers: Object.fromEntries(TRAIT_KEYS.map((k) => [k, answers && answers[k]])),
+  }]).slice(-50);
+
+  return next;
+}
+
+/* How much this student's feedback has moved things, for the UI to show. */
+export function adjustmentSummary(adjustments) {
+  const adj = safeAdjustments(adjustments);
+  const rows = [];
+  for (const [strandId, deltas] of Object.entries(adj.strandWeights)) {
+    const strand = STRAND_BY_ID[strandId];
+    if (!strand || !strand.weights) continue;
+    for (const [trait, delta] of Object.entries(deltas)) {
+      const base = strand.weights[trait] || 0;
+      const value = boundWeight(base, base + delta);
+      if (Math.abs(value - base) >= 0.005) {
+        rows.push({ scope: strandId, trait, label: LABEL[trait], base, value, delta: value - base });
+      }
+    }
+  }
+  rows.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  return { rows, count: adj.history.length, history: adj.history };
+}
+
 /* ---------------- scoring primitives ---------------- */
 
 const clamp01 = (n) => (n < 0 ? 0 : n > 1 ? 1 : n);
@@ -131,36 +277,91 @@ function stdev(nums) {
    absolute  — how highly they rated the traits this strand wants
    relative  — how far those traits sit above their own average, which is
                what distinguishes a preference from blanket enthusiasm */
-function weightedScore(r01, weights) {
+const ABS_SHARE = 0.65;
+const REL_SHARE = 0.35;
+
+function weightedScore(r01, effective) {
   const avg = mean(TRAIT_KEYS.map((k) => r01[k]));
-  const entries = Object.entries(weights);
-  const total = entries.reduce((sum, [, w]) => sum + w, 0) || 1;
+  const entries = Object.entries(effective);
+  const total = entries.reduce((sum, [, w]) => sum + w.value, 0) || 1;
 
   let absolute = 0;
   let relative = 0;
   const parts = [];
 
   for (const [key, w] of entries) {
-    absolute += w * r01[key];
-    relative += w * (r01[key] - avg);
-    parts.push({ key, label: LABEL[key], weight: w, value: r01[key], share: (w * r01[key]) / total });
+    absolute += w.value * r01[key];
+    relative += w.value * (r01[key] - avg);
+    parts.push({
+      key,
+      label: LABEL[key],
+      rating: Math.round(r01[key] * 4) + 1,
+      value: r01[key],
+      baseWeight: w.base,
+      weight: w.value,
+      adjusted: Math.abs(w.value - w.base) >= 0.005,
+      contribution: w.value * r01[key],
+      share: (w.value * r01[key]) / total,
+    });
   }
 
   absolute /= total;
   relative /= total;
 
   parts.sort((a, b) => b.share - a.share);
-  return { score: clamp01(0.65 * absolute + 0.35 * (0.5 + relative)), parts, absolute, relative };
+  const score = clamp01(ABS_SHARE * absolute + REL_SHARE * (0.5 + relative));
+
+  return {
+    score,
+    parts,
+    absolute,
+    relative,
+    trace: {
+      kind: "weighted",
+      rows: parts,
+      totalWeight: total,
+      studentAverage: avg,
+      absolute,
+      relative,
+      blended: ABS_SHARE * absolute + REL_SHARE * (0.5 + relative),
+      formula: "(" + ABS_SHARE + " x absolute) + (" + REL_SHARE + " x (0.5 + relative))",
+    },
+  };
 }
 
 /* GAS rewards a level profile: broadly interested, nothing dominating. */
+const GAS_AVG_SHARE = 0.45;
+const GAS_EVEN_SHARE = 0.55;
+const GAS_SPREAD_REFERENCE = 0.4;
+
 function gasScore(r01) {
   const values = TRAIT_KEYS.map((k) => r01[k]);
   const avg = mean(values);
   const spread = stdev(values);
   /* 0.40 is roughly the spread of a strongly specialised profile */
-  const evenness = clamp01(1 - spread / 0.4);
-  return { score: clamp01(0.45 * avg + 0.55 * evenness), evenness, avg, spread };
+  const evenness = clamp01(1 - spread / GAS_SPREAD_REFERENCE);
+  const blended = GAS_AVG_SHARE * avg + GAS_EVEN_SHARE * evenness;
+
+  return {
+    score: clamp01(blended),
+    evenness,
+    avg,
+    spread,
+    parts: [],
+    trace: {
+      kind: "evenness",
+      rows: TRAIT_KEYS.map((k) => ({
+        key: k, label: LABEL[k], rating: Math.round(r01[k] * 4) + 1, value: r01[k],
+      })),
+      average: avg,
+      spread,
+      spreadReference: GAS_SPREAD_REFERENCE,
+      evenness,
+      blended,
+      formula: "(" + GAS_AVG_SHARE + " x average) + (" + GAS_EVEN_SHARE +
+        " x evenness), where evenness = 1 - (spread / " + GAS_SPREAD_REFERENCE + ")",
+    },
+  };
 }
 
 const pct = (score) => Math.round(score * 100);
@@ -341,20 +542,91 @@ function explainCareer(career, detail, strandPct) {
 
 /* Returns every strand ranked with a match percentage and a reason, and the
    careers that follow from those answers, likewise ranked and explained. */
+const CAREER_TRAIT_SHARE = 0.7;
+const CAREER_STRAND_SHARE = 0.3;
+const ACTIVITY_MAX_BONUS = 0.12;
+
+/* Re-add a trace and check it reproduces the score it claims to explain.
+   If this ever fails, the explanation shown to a student has drifted from
+   the calculation, which is worse than showing nothing. */
+export function verifyTrace(entry, tolerance) {
+  const t = entry && entry.trace;
+  if (!t) return { ok: false, reason: "no trace" };
+  const eps = tolerance || 0.0005;
+
+  if (t.kind === "weighted") {
+    const total = t.rows.reduce((sum, r) => sum + r.weight, 0);
+    const contributions = t.rows.reduce((sum, r) => sum + r.contribution, 0);
+    const absolute = contributions / (total || 1);
+    const relative =
+      t.rows.reduce((sum, r) => sum + r.weight * (r.value - t.studentAverage), 0) / (total || 1);
+    const blended = ABS_SHARE * absolute + REL_SHARE * (0.5 + relative);
+    const final = Math.min(1, Math.max(0, blended + (t.activityBonus || 0)));
+    return {
+      ok: Math.abs(final - entry.score) < eps && Math.abs(total - t.totalWeight) < eps,
+      recomputed: final,
+      claimed: entry.score,
+    };
+  }
+
+  if (t.kind === "evenness") {
+    const evenness = Math.min(1, Math.max(0, 1 - t.spread / t.spreadReference));
+    const blended = GAS_AVG_SHARE * t.average + GAS_EVEN_SHARE * evenness;
+    const final = Math.min(1, Math.max(0, blended + (t.activityBonus || 0)));
+    return { ok: Math.abs(final - entry.score) < eps, recomputed: final, claimed: entry.score };
+  }
+
+  if (t.kind === "career") {
+    const total = t.rows.reduce((sum, r) => sum + r.weight, 0);
+    const absolute = t.rows.reduce((sum, r) => sum + r.contribution, 0) / (total || 1);
+    const relative =
+      t.rows.reduce((sum, r) => sum + r.weight * (r.value - t.studentAverage), 0) / (total || 1);
+    const traitFit = Math.min(1, Math.max(0, ABS_SHARE * absolute + REL_SHARE * (0.5 + relative)));
+    const final = Math.min(
+      1,
+      Math.max(0, CAREER_TRAIT_SHARE * traitFit + CAREER_STRAND_SHARE * t.strandFit + (t.bias || 0))
+    );
+    return { ok: Math.abs(final - entry.score) < eps, recomputed: final, claimed: entry.score };
+  }
+
+  return { ok: false, reason: "unknown trace kind" };
+}
+
+/* Returns every strand ranked with a match percentage, a reason and the
+   arithmetic behind it, plus the careers those answers point to, likewise
+   ranked and explained.
+
+   options.adjustments — this student's accumulated feedback, if any. */
 export function recommend(answers, options) {
-  const limit = (options && options.careerLimit) || 6;
+  const opts = options || {};
+  const limit = opts.careerLimit || 6;
+  const adj = safeAdjustments(opts.adjustments);
+
   const r01 = normalise(answers);
   const activity = answers && ACTIVITY_BY_VALUE[answers.preferred_activity]
     ? answers.preferred_activity
     : null;
-  const bonuses = activity ? ACTIVITY_BY_VALUE[activity].bonus : {};
+  const activityDef = activity ? ACTIVITY_BY_VALUE[activity] : null;
+  const bonuses = activityDef ? activityDef.bonus : {};
 
   const strands = STRANDS.map((strand) => {
-    const detail = strand.weights ? weightedScore(r01, strand.weights) : gasScore(r01);
+    const effective = strand.weights
+      ? effectiveWeights(strand.weights, adj.strandWeights[strand.id])
+      : null;
+    const detail = effective ? weightedScore(r01, effective) : gasScore(r01);
+
     /* The activity is worth at most twelve points — a nudge between close
        strands, never enough to overturn the ratings. */
-    const bonus = (bonuses[strand.id] || 0) * 0.12;
+    const bonus = (bonuses[strand.id] || 0) * ACTIVITY_MAX_BONUS;
     const score = clamp01(detail.score + bonus);
+
+    const trace = {
+      ...detail.trace,
+      activityBonus: bonus,
+      activityLabel: activityDef ? activityDef.label : null,
+      final: score,
+    };
+
     return {
       id: strand.id,
       name: strand.name,
@@ -363,18 +635,27 @@ export function recommend(answers, options) {
       score,
       match: pct(score),
       activityBonus: Math.round(bonus * 100),
+      adjusted: effective ? Object.values(effective).some((w) => Math.abs(w.value - w.base) >= 0.005) : false,
       why: explainStrand(strand, detail, r01, activity),
+      trace,
     };
   }).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
+  const strandScore = Object.fromEntries(strands.map((s) => [s.id, s.score]));
   const strandPct = Object.fromEntries(strands.map((s) => [s.id, s.match]));
   const topStrand = strands[0];
 
   const careers = CAREERS.map((career) => {
-    const detail = weightedScore(r01, career.weights);
+    const effective = effectiveWeights(career.weights, adj.careerWeights[career.title]);
+    const detail = weightedScore(r01, effective);
+    const bias = adj.careerBias[career.title] || 0;
+
     /* Trait fit is what the work needs; strand fit keeps the list coherent
        with the strand result instead of contradicting it. */
-    const score = clamp01(0.7 * detail.score + 0.3 * (strandPct[career.strand] / 100));
+    const blended =
+      CAREER_TRAIT_SHARE * detail.score + CAREER_STRAND_SHARE * strandScore[career.strand];
+    const score = clamp01(blended + bias);
+
     return {
       title: career.title,
       strand: career.strand,
@@ -382,11 +663,30 @@ export function recommend(answers, options) {
       note: career.note,
       score,
       match: pct(score),
+      adjusted: Object.values(effective).some((w) => Math.abs(w.value - w.base) >= 0.005) || Math.abs(bias) >= 0.005,
       why: explainCareer(career, detail, strandPct[career.strand]),
+      trace: {
+        ...detail.trace,
+        kind: "career",
+        traitFit: detail.score,
+        strandId: career.strand,
+        strandFit: strandScore[career.strand],
+        bias,
+        final: score,
+        formula:
+          "(" + CAREER_TRAIT_SHARE + " x trait fit) + (" + CAREER_STRAND_SHARE +
+          " x " + career.strand + " fit)" + (Math.abs(bias) >= 0.005 ? " + your feedback" : ""),
+      },
     };
   })
     .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
     .slice(0, limit);
 
-  return { strands, careers, topStrand, activity };
+  return {
+    strands,
+    careers,
+    topStrand,
+    activity,
+    adjustments: adjustmentSummary(adj),
+  };
 }

@@ -106,9 +106,54 @@ straight to college can see their options.
 apply button, because the profile splits TVL into four tracks and picking one
 would be inventing an answer the questionnaire did not ask for.
 
-To adjust the model, edit the weights in `src/lib/recommend.js` — `STRANDS[].weights`,
-`ACTIVITIES[].bonus` and `CAREERS[].weights` are the whole of it. Nothing else
-needs to change.
+To adjust the starting model, edit the weights in `src/lib/recommend.js` —
+`STRANDS[].weights`, `ACTIVITIES[].bonus` and `CAREERS[].weights` are the whole
+of it.
+
+### It adapts to the student
+
+Each strand and each career carries **Fits me** / **Not for me**. Feedback is
+evidence about that student, so it moves the weights and the next score
+reflects it — locally, on that device, with nothing sent anywhere.
+
+The rule is one line of reasoning: *a student who says a job fits is telling us
+the traits that job leans on matter more to them than the starting model
+assumed, and the evidence is strongest for the traits they themselves rated
+highly.* So each weight moves by `rate × signal × their own rating for that
+trait`, scaled by how much the job leans on it. "Not for me" moves the same
+weights the other way. The job's strand gets half the same movement, because
+endorsing one job is partial evidence about its family, not proof.
+
+Three properties keep this safe to hand to a class:
+
+- **The base model is never mutated.** Feedback accumulates as *deltas*, so any
+  adjusted weight can be shown as `3.0 → 3.4` and **Reset what it learned**
+  is simply deleting them.
+- **Weights are bounded** to `[0, 2 × base + 1]`. No amount of clicking lets
+  one subject take over or disappear.
+- **It stays deterministic.** The same answers and the same feedback always
+  give the same result — there is no randomness and no dependence on other
+  students.
+
+### Showing your teacher how it works
+
+**Show the maths** opens the worked calculation behind the result:
+
+1. **Trait by trait** for the top strand — a table of each trait, the student's
+   1-5 rating, its 0-1 conversion, the weight (with the original beside it if
+   feedback has moved it) and the contribution, with the column totals.
+2. **The subtotals** — absolute, relative, the blend, the activity bonus and
+   the final score, each written out as the sum that produced it.
+3. **All five strands** side by side.
+4. **The top career** — trait fit, strand fit, the 70/30 blend.
+5. **What the feedback changed** — every weight that has moved, with its
+   starting value.
+
+Everything shown is recomputable by hand from the numbers on screen. That is
+enforced rather than hoped for: `verifyTrace()` re-adds each trace and checks
+it reproduces the score it claims to explain, and the test suite runs it over
+every strand and career, before and after feedback and at the weight cap. If
+the explanation ever drifts from the calculation, the tests fail.
 
 ### Career match
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { PH_LOCATIONS, PH_SCHOOLS, schoolsForCity } from "./data/places.js";
-import { ACTIVITIES, ACTIVITY_VALUES, TRAITS, recommend } from "./lib/recommend.js";
+import { ACTIVITIES, ACTIVITY_VALUES, TRAITS, applyFeedback, emptyAdjustments, recommend }
+  from "./lib/recommend.js";
 
 /* ==========================================================
    SmartPath — AI-Powered Career Guidance & Resume Builder
@@ -747,8 +748,184 @@ function matchStrandOption(id) {
   return ["STEM", "ABM", "HUMSS", "GAS"].includes(id) ? id : null;
 }
 
-function StrandQuiz({ quiz, setQuiz, shown, setShown, profile, setProfile, save }) {
+/* Two buttons, deliberately plain. "Fits me" and "Not for me" are claims a
+   student can make honestly; a five-star scale would invite noise. */
+function Feedback({ onYes, onNo }) {
+  const [sent, setSent] = useState(null);
+  const press = (signal, fn) => { setSent(signal); fn(); };
+  return (
+    <div className="sp-fb">
+      <button className={"sp-fb-btn" + (sent === 1 ? " is-on" : "")}
+        onClick={() => press(1, onYes)} aria-label="This fits me">
+        Fits me
+      </button>
+      <button className={"sp-fb-btn" + (sent === -1 ? " is-on" : "")}
+        onClick={() => press(-1, onNo)} aria-label="This is not for me">
+        Not for me
+      </button>
+      {sent ? <span className="sp-fb-note">Noted — the scores below moved.</span> : null}
+    </div>
+  );
+}
+
+const dp = (n, places) => Number(n).toFixed(places === undefined ? 2 : places);
+
+/* The worked calculation. Everything on screen is recomputable by hand from
+   the numbers shown, which is the point: a reader should be able to check
+   the result rather than believe it. */
+function Maths({ result }) {
+  const top = result.strands[0];
+  const career = result.careers[0];
+  const t = top.trace;
+
+  return (
+    <div className="sp-maths">
+      <p className="sp-maths-intro">
+        Every score below is arithmetic on your eight answers. Ratings are converted from 1-5 to
+        0-1 (rating&nbsp;−&nbsp;1)&nbsp;÷&nbsp;4, multiplied by the weight each strand gives that
+        subject, and added up.
+      </p>
+
+      <span className="sp-chip-label sp-quiz-section">Step 1 — {top.name}, trait by trait</span>
+      {t.kind === "weighted" ? (
+        <>
+          <div className="sp-mtable-wrap">
+            <table className="sp-mtable">
+              <thead>
+                <tr><th>Trait</th><th>Your rating</th><th>0-1</th><th>Weight</th><th>Contribution</th></tr>
+              </thead>
+              <tbody>
+                {t.rows.map((r) => (
+                  <tr key={r.key}>
+                    <td>{r.label}</td>
+                    <td>{r.rating}</td>
+                    <td>{dp(r.value)}</td>
+                    <td>
+                      {dp(r.weight)}
+                      {r.adjusted ? <span className="sp-tuned"> (was {dp(r.baseWeight)})</span> : null}
+                    </td>
+                    <td>{dp(r.contribution)}</td>
+                  </tr>
+                ))}
+                <tr className="sp-mtable-sum">
+                  <td colSpan={3}>Totals</td>
+                  <td>{dp(t.totalWeight)}</td>
+                  <td>{dp(t.rows.reduce((a, r) => a + r.contribution, 0))}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <ul className="sp-steps">
+            <li>
+              <b>Absolute</b> = total contribution ÷ total weight ={" "}
+              {dp(t.rows.reduce((a, r) => a + r.contribution, 0))} ÷ {dp(t.totalWeight)} ={" "}
+              <b>{dp(t.absolute, 3)}</b>
+            </li>
+            <li>
+              <b>Relative</b> = the same sum measured against your own average rating of{" "}
+              {dp(t.studentAverage)} = <b>{dp(t.relative, 3)}</b>. This is what separates a real
+              preference from rating everything highly.
+            </li>
+            <li>
+              <b>Blend</b> = {t.formula} = <b>{dp(t.blended, 3)}</b>
+            </li>
+            {t.activityBonus ? (
+              <li>
+                <b>Activity bonus</b> for “{t.activityLabel}” = +{dp(t.activityBonus, 3)} (capped at
+                0.12, so it can separate two close strands but not overturn your ratings)
+              </li>
+            ) : null}
+            <li>
+              <b>Final</b> = {dp(t.final, 3)} → shown as <b>{top.match}%</b>
+            </li>
+          </ul>
+        </>
+      ) : (
+        <ul className="sp-steps">
+          <li>Your average rating = <b>{dp(t.average, 3)}</b></li>
+          <li>Spread (standard deviation) of your seven ratings = <b>{dp(t.spread, 3)}</b></li>
+          <li>Evenness = 1 − (spread ÷ {t.spreadReference}) = <b>{dp(t.evenness, 3)}</b></li>
+          <li>{t.formula} = <b>{dp(t.blended, 3)}</b> → shown as <b>{top.match}%</b></li>
+          <li className="sp-steps-note">
+            GAS is scored on evenness rather than trait weights because it is the strand for
+            students who have not narrowed down. A flat profile scores highest here.
+          </li>
+        </ul>
+      )}
+
+      <span className="sp-chip-label sp-quiz-section">Step 2 — all five strands</span>
+      <div className="sp-mtable-wrap">
+        <table className="sp-mtable">
+          <thead><tr><th>Strand</th><th>Score</th><th>Match</th></tr></thead>
+          <tbody>
+            {result.strands.map((x) => (
+              <tr key={x.id}>
+                <td>{x.name}</td>
+                <td>{dp(x.score, 3)}</td>
+                <td>{x.match}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <span className="sp-chip-label sp-quiz-section">Step 3 — {career.title}</span>
+      <ul className="sp-steps">
+        <li>
+          <b>Trait fit</b> = the same calculation against the traits this job uses ={" "}
+          <b>{dp(career.trace.traitFit, 3)}</b>
+        </li>
+        <li>
+          <b>{career.trace.strandId} fit</b> = <b>{dp(career.trace.strandFit, 3)}</b>, carried over
+          from step 2 so the job list cannot contradict the strand result
+        </li>
+        {Math.abs(career.trace.bias) >= 0.005 ? (
+          <li><b>Your feedback</b> on this job = {career.trace.bias > 0 ? "+" : ""}{dp(career.trace.bias, 3)}</li>
+        ) : null}
+        <li><b>Final</b> = {career.trace.formula} = {dp(career.trace.final, 3)} → <b>{career.match}%</b></li>
+      </ul>
+
+      <span className="sp-chip-label sp-quiz-section">What your feedback changed</span>
+      {result.adjustments.rows.length ? (
+        <>
+          <div className="sp-mtable-wrap">
+            <table className="sp-mtable">
+              <thead><tr><th>Strand</th><th>Trait</th><th>Starting weight</th><th>Now</th></tr></thead>
+              <tbody>
+                {result.adjustments.rows.slice(0, 8).map((r) => (
+                  <tr key={r.scope + r.trait}>
+                    <td>{r.scope}</td>
+                    <td>{r.label}</td>
+                    <td>{dp(r.base)}</td>
+                    <td>{dp(r.value)} <span className="sp-tuned">({r.delta > 0 ? "+" : ""}{dp(r.delta)})</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="sp-steps-note">
+            Each “fits me” or “not for me” moves the weights of the traits that job leans on, in
+            proportion to how highly you rated them. {result.adjustments.count} response
+            {result.adjustments.count === 1 ? "" : "s"} recorded so far. A weight can never fall
+            below zero or rise past double its starting value, so no amount of clicking lets one
+            subject take over.
+          </p>
+        </>
+      ) : (
+        <p className="sp-steps-note">
+          Nothing yet — the weights above are the starting model. Use “Fits me” or “Not for me” on
+          a strand or a job and this table will show exactly which weights moved and by how much.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustments,
+  profile, setProfile, save }) {
   const [open, setOpen] = useState(false);
+  const [maths, setMaths] = useState(false);
 
   const activity = ACTIVITY_VALUES.includes(quiz.preferred_activity) ? quiz.preferred_activity : "";
   const answered = !!activity;
@@ -756,9 +933,25 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, profile, setProfile, save 
   /* Scoring is instant arithmetic, so the result recomputes as they adjust
      rather than waiting behind a request. */
   const result = useMemo(
-    () => (answered ? recommend({ ...quiz, preferred_activity: activity }) : null),
-    [quiz, activity, answered]
+    () => (answered ? recommend({ ...quiz, preferred_activity: activity }, { adjustments }) : null),
+    [quiz, activity, answered, adjustments]
   );
+
+  /* Feedback is evidence about this student, so it is stored with their work
+     and folded into the next score — nothing leaves the device. */
+  function feedback(kind, id, signal) {
+    const next = applyFeedback(adjustments, {
+      kind, id, signal, answers: { ...quiz, preferred_activity: activity },
+    });
+    setAdjustments(next);
+    save({ adjustments: next });
+  }
+
+  function resetLearning() {
+    const next = emptyAdjustments();
+    setAdjustments(next);
+    save({ adjustments: next });
+  }
 
   function set(key, value) {
     const next = { ...quiz, [key]: value };
@@ -876,7 +1069,12 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, profile, setProfile, save 
                   <span className="sp-compare-fill" style={{ width: s.match + "%" }} />
                 </span>
                 <span className="sp-quiz-rpct">{s.match}%</span>
-                <p className="sp-quiz-reason">{s.why}</p>
+                <p className="sp-quiz-reason">
+                  {s.why}
+                  {s.adjusted ? <span className="sp-tuned"> Adjusted by your feedback.</span> : null}
+                </p>
+                <Feedback onYes={() => feedback("strand", s.id, 1)}
+                  onNo={() => feedback("strand", s.id, -1)} />
               </li>
             ))}
           </ul>
@@ -894,10 +1092,28 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, profile, setProfile, save 
                   <span className="sp-badge sp-badge-route">{ROUTES[c.route] || c.route}</span>
                   <span className="sp-badge sp-badge-route">{c.strand}</span>
                 </div>
-                <p className="sp-quiz-reason">{c.why} {c.note}</p>
+                <p className="sp-quiz-reason">
+                  {c.why} {c.note}
+                  {c.adjusted ? <span className="sp-tuned"> Adjusted by your feedback.</span> : null}
+                </p>
+                <Feedback onYes={() => feedback("career", c.title, 1)}
+                  onNo={() => feedback("career", c.title, -1)} />
               </li>
             ))}
           </ul>
+
+          <div className="sp-actions sp-maths-bar">
+            <button className="sp-btn sp-btn-small" onClick={() => setMaths(!maths)}>
+              {maths ? "Hide the maths" : "Show the maths"}
+            </button>
+            {result.adjustments.count ? (
+              <button className="sp-btn sp-btn-small" onClick={resetLearning}>
+                Reset what it learned ({result.adjustments.count})
+              </button>
+            ) : null}
+          </div>
+
+          {maths ? <Maths result={result} /> : null}
 
           <p className="sp-fineprint">
             Scored on this device from your eight answers — no account, no internet, and the same
@@ -933,7 +1149,7 @@ function slug(s) {
 }
 
 function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen, roadmap, setRoadmap,
-  quiz, setQuiz, quizShown, setQuizShown, save, goResume }) {
+  quiz, setQuiz, quizShown, setQuizShown, adjustments, setAdjustments, save, goResume }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [mapBusy, setMapBusy] = useState(false);
@@ -1008,6 +1224,7 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
       </header>
 
       <StrandQuiz quiz={quiz} setQuiz={setQuiz} shown={quizShown} setShown={setQuizShown}
+        adjustments={adjustments} setAdjustments={setAdjustments}
         profile={profile} setProfile={setProfile} save={save} />
 
       <Notice kind="error" onRetry={error ? run : null}>{error}</Notice>
@@ -1674,6 +1891,7 @@ export default function SmartPath() {
   const [chat, setChat] = useState([]);
   const [quiz, setQuiz] = useState(blankQuiz);
   const [quizShown, setQuizShown] = useState(false);
+  const [adjustments, setAdjustments] = useState(emptyAdjustments());
 
   useEffect(() => {
     (async () => {
@@ -1707,6 +1925,7 @@ export default function SmartPath() {
     setChat(d.chat || []);
     setQuiz({ ...blankQuiz, ...(d.quiz || {}) });
     setQuizShown(!!d.quizShown);
+    setAdjustments(d.adjustments || emptyAdjustments());
     setUser(u);
     setTab("home");
   }
@@ -1716,7 +1935,7 @@ export default function SmartPath() {
     const current = (await store.get("data:" + user)) || {};
     await store.set("data:" + user, {
       ...current, profile, careers, chosen, roadmap, resume,
-      resumeBuilt: built, prep, scores, chat, quiz, quizShown, ...(patch || {}),
+      resumeBuilt: built, prep, scores, chat, quiz, quizShown, adjustments, ...(patch || {}),
     });
   }
 
@@ -1724,7 +1943,7 @@ export default function SmartPath() {
     await store.set("session", {});
     setUser(null); setProfile(blankProfile); setCareers([]); setChosen("");
     setRoadmap(null); setResume(blankResume); setBuilt(null); setPrep(null);
-    setScores({}); setChat([]); setQuiz(blankQuiz); setQuizShown(false); setTab("home");
+    setScores({}); setChat([]); setQuiz(blankQuiz); setQuizShown(false); setAdjustments(emptyAdjustments()); setTab("home");
   }
 
   const done = {
@@ -1769,6 +1988,7 @@ export default function SmartPath() {
           <MatchTab profile={profile} setProfile={setProfile} careers={careers} setCareers={setCareers}
             chosen={chosen} setChosen={setChosen} roadmap={roadmap} setRoadmap={setRoadmap}
             quiz={quiz} setQuiz={setQuiz} quizShown={quizShown} setQuizShown={setQuizShown}
+            adjustments={adjustments} setAdjustments={setAdjustments}
             save={save} goResume={() => setTab("resume")} />
         ) : null}
         {tab === "resume" ? (
@@ -2172,6 +2392,35 @@ function Styles() {
 .sp-job .sp-badges{margin:8px 0 0}
 .sp-job .sp-quiz-reason{margin-top:8px}
 .sp-quiz-result .sp-fineprint{margin-top:16px}
+
+/* feedback and the worked calculation */
+.sp-fb{grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:2px}
+.sp-fb-btn{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--ink-soft);background:var(--card);border:1px solid var(--line);border-radius:3px;
+  padding:5px 9px;cursor:pointer;transition:border-color .12s,color .12s,background .12s}
+.sp-fb-btn:hover{border-color:var(--route);color:var(--ink)}
+.sp-fb-btn.is-on{background:var(--panel);border-color:var(--panel);color:var(--on-panel)}
+.sp-fb-note{font-size:11.5px;color:var(--route)}
+.sp-tuned{color:var(--route);font-family:var(--mono);font-size:11px}
+.sp-maths-bar{margin-top:18px}
+
+.sp-maths{margin-top:14px;padding:14px 15px;background:var(--card);
+  border:1px solid var(--line);border-radius:4px}
+.sp-maths-intro{margin:0;font-size:13px;line-height:1.6;color:var(--ink-soft)}
+.sp-maths .sp-quiz-section:first-of-type{margin-top:16px}
+.sp-mtable-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.sp-mtable{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+.sp-mtable th,.sp-mtable td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--line);
+  white-space:nowrap}
+.sp-mtable th{font-weight:600;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em;
+  font-size:10px}
+.sp-mtable td{color:var(--ink)}
+.sp-mtable-sum td{font-weight:700;border-bottom:none}
+.sp-steps{margin:12px 0 0;padding-left:18px;display:grid;gap:7px;
+  font-size:12.5px;line-height:1.6;color:var(--ink)}
+.sp-steps b{font-family:var(--mono);font-size:12px}
+.sp-steps-note{list-style:none;margin-left:-18px;color:var(--ink-soft);font-size:12px}
+p.sp-steps-note{margin:10px 0 0;padding:0;font-size:12px;line-height:1.6;color:var(--ink-soft)}
 
 /* career match: compare strip, filters, badges */
 .sp-compare{background:var(--card);border:1.5px solid var(--line);border-radius:5px;padding:15px 16px;margin-bottom:14px}
