@@ -14,7 +14,10 @@ src/main.jsx                    React entry point
 src/SmartPath.jsx               the whole app (UI, styles, logic)
 src/data/places.js              Philippine cities, provinces and schools
 src/index.css                   minimal page reset
-src/lib/recommend.js            local strand + career scoring (no network)
+model/*.joblib                  the trained AutoTrain model, as exported
+src/lib/strand-model.json       that model's tree, unpacked for the browser
+src/lib/strandModel.js          walks the tree — the strand prediction
+src/lib/recommend.js            career ranking on top of it (no network)
 netlify/functions/chat.mjs      Anthropic endpoint (holds the API key)
 vite.config.js                  build config + /api/chat middleware for `npm run dev`
 netlify.toml                    build, routing and header config for Netlify
@@ -63,18 +66,63 @@ name with the province in brackets — `City of San Fernando (La Union)` and
 `City of San Fernando (Pampanga)` — and each has its own school group. They
 sort under "C", but typing "san fernando" finds either one.
 
+### The trained model
+
+The strand prediction comes from **this project's own AutoTrain Decision
+Tree**, exported as `model.joblib` and running in the browser.
+
+| | |
+| --- | --- |
+| Algorithm | Decision tree (gini), depth 8 |
+| Trained on | 120 rows, `target_strand` |
+| Structure | 53 nodes, 27 leaves |
+| Classes | ABM, GAS, HUMSS, STEM, TVL |
+| Features | seven 1-5 ratings + `preferred_activity` |
+
+**It is not retrained here.** `scripts/export-model.py` unpacks the scikit-learn
+pipeline into `src/lib/strand-model.json` — the same thresholds, the same class
+order, the same categories — and records the sha256 of the source `.joblib` so
+the artifact submitted and the artifact running can be shown to be the same
+model. `src/lib/strandModel.js` then walks that tree in JavaScript.
+
+A decision tree is the one model that ports perfectly to a browser: it is a few
+dozen comparisons, so a prediction that previously needed an API endpoint, a
+Firebase login and an hourly token is now offline, instant and free.
+
+**Parity is checked, not assumed.** `scripts/model-truth.py` runs the real
+scikit-learn pipeline and `scripts/model-parity.mjs` compares it against the
+browser evaluator:
+
+```bash
+pip install scikit-learn joblib pandas
+python3 scripts/model-truth.py > /tmp/sklearn_truth.json
+node scripts/model-parity.mjs
+```
+
+5,615 cases across every category — including values the model never saw and a
+missing value — agree exactly, with zero difference in class probabilities. The
+one sample with independent provenance, from the AutoTrain Testing Console,
+reproduces `HUMSS` at confidence `1.0`.
+
+**⚠ The activity list is the model's, not ours.** The tree was fitted on five
+categories — `building_or_creating`, `managing_money`, `mixed_subjects`,
+`public_speaking`, `solving_problems` — so those are exactly what the
+questionnaire offers. An earlier version of this app offered seven invented
+values, of which six encoded to "unknown" and collapsed to a single
+prediction. If the model is retrained with different categories, update the
+dropdown by re-exporting: it reads `MODEL_ACTIVITIES` straight from the JSON.
+
 ### Strand and career match
 
-The **Career match** tab opens with an eight-question form — seven 1-5 interest
-ratings and one activity — scored by `src/lib/recommend.js` **in the browser**.
-No network call, no model, no key: the same answers always produce the same
-result, and it works offline.
+The **Career match** tab opens with the eight-question form. The **strand** is
+predicted by the trained decision tree above; the **careers** are SmartPath's
+own ranking layer, scored from the same answers against the strand the model
+chose, so the two cannot contradict each other. Both run in the browser with no
+network call and no key.
 
-All five strands come back ranked with a match percentage and a reason written
-from the student's own answers ("You rated Math (very much), Science (very
-much) and Technology (a lot), and those carry the most weight for STEM"),
-followed by the careers those answers point to, each with its own percentage,
-route badge and reason.
+Student feedback moves the career weights only. The trained model is never
+adjusted — that would be retraining it, and its predictions have to stay the
+model's own.
 
 **How the scoring works.** Each strand carries weights over the seven traits —
 STEM leans on maths, science and technology; ABM on business, communication and
@@ -139,15 +187,19 @@ Three properties keep this safe to hand to a class:
 
 **Show the maths** opens the worked calculation behind the result:
 
-1. **Trait by trait** for the top strand — a table of each trait, the student's
-   1-5 rating, its 0-1 conversion, the weight (with the original beside it if
-   feedback has moved it) and the contribution, with the column totals.
-2. **The subtotals** — absolute, relative, the blend, the activity bonus and
-   the final score, each written out as the sum that produced it.
-3. **All five strands** side by side.
+1. **Your answers as the model sees them** — the seven ratings passed through
+   unchanged, and the activity turned into a number by its position in the
+   list the model was trained on.
+2. **The path down the tree** — every comparison the model made, with the node
+   number, the test (`business_interest ≤ 3.50`), the student's value, which
+   way it went, and how many training rows sat at that node.
+3. **The leaf it reached** — the class distribution there, which is exactly
+   where the confidence percentage comes from.
 4. **The top career** — trait fit, strand fit, the 70/30 blend.
-5. **What the feedback changed** — every weight that has moved, with its
-   starting value.
+5. **What the feedback changed** — every career weight that has moved.
+
+For a decision tree that path *is* the explanation: there is no coefficient to
+interpret, just a sequence of yes/no questions a reader can follow and check.
 
 Everything shown is recomputable by hand from the numbers on screen. That is
 enforced rather than hoped for: `verifyTrace()` re-adds each trace and checks

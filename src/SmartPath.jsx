@@ -1,7 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { PH_LOCATIONS, PH_SCHOOLS, schoolsForCity } from "./data/places.js";
-import { ACTIVITIES, ACTIVITY_VALUES, TRAITS, applyFeedback, emptyAdjustments,
-  localCareerCards, recommend } from "./lib/recommend.js";
+import { TRAITS, applyFeedback, emptyAdjustments, localCareerCards, recommend }
+  from "./lib/recommend.js";
+import { MODEL, MODEL_ACTIVITIES, activityLabel, predict } from "./lib/strandModel.js";
+
+/* The activity values the trained model was fitted on. Anything else encodes
+   to "unknown", which is a branch no training row ever took, so the
+   questionnaire offers exactly these five. */
+const ACTIVITY_VALUES = MODEL_ACTIVITIES;
 
 /* ==========================================================
    SmartPath — AI-Powered Career Guidance & Resume Builder
@@ -773,107 +779,95 @@ const dp = (n, places) => Number(n).toFixed(places === undefined ? 2 : places);
 /* The worked calculation. Everything on screen is recomputable by hand from
    the numbers shown, which is the point: a reader should be able to check
    the result rather than believe it. */
-function Maths({ result }) {
+function Maths({ result, prediction }) {
   const top = result.strands[0];
   const career = result.careers[0];
-  const t = top.trace;
+  const p = prediction;
 
   return (
     <div className="sp-maths">
       <p className="sp-maths-intro">
-        Every score below is arithmetic on your eight answers. Ratings are converted from 1-5 to
-        0-1 (rating&nbsp;−&nbsp;1)&nbsp;÷&nbsp;4, multiplied by the weight each strand gives that
-        subject, and added up.
+        The strand comes from a <b>decision tree</b> trained for this project on{" "}
+        {MODEL.tree.n_node_samples[0]} rows and exported from AutoTrain as <code>model.joblib</code>.
+        The tree has {MODEL.tree.node_count} nodes and {MODEL.tree.n_leaves} leaves, and is{" "}
+        {MODEL.tree.max_depth} levels deep. It is not retrained here — this app walks the exported
+        tree and shows every comparison it makes.
       </p>
 
-      <span className="sp-chip-label sp-quiz-section">Step 1 — {top.name}, trait by trait</span>
-      {t.kind === "weighted" ? (
-        <>
-          <div className="sp-mtable-wrap">
-            <table className="sp-mtable">
-              <thead>
-                <tr><th>Trait</th><th>Your rating</th><th>0-1</th><th>Weight</th><th>Contribution</th></tr>
-              </thead>
-              <tbody>
-                {t.rows.map((r) => (
-                  <tr key={r.key}>
-                    <td>{r.label}</td>
-                    <td>{r.rating}</td>
-                    <td>{dp(r.value)}</td>
-                    <td>
-                      {dp(r.weight)}
-                      {r.adjusted ? <span className="sp-tuned"> (was {dp(r.baseWeight)})</span> : null}
-                    </td>
-                    <td>{dp(r.contribution)}</td>
-                  </tr>
-                ))}
-                <tr className="sp-mtable-sum">
-                  <td colSpan={3}>Totals</td>
-                  <td>{dp(t.totalWeight)}</td>
-                  <td>{dp(t.rows.reduce((a, r) => a + r.contribution, 0))}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <ul className="sp-steps">
-            <li>
-              <b>Absolute</b> = total contribution ÷ total weight ={" "}
-              {dp(t.rows.reduce((a, r) => a + r.contribution, 0))} ÷ {dp(t.totalWeight)} ={" "}
-              <b>{dp(t.absolute, 3)}</b>
-            </li>
-            <li>
-              <b>Relative</b> = the same sum measured against your own average rating of{" "}
-              {dp(t.studentAverage)} = <b>{dp(t.relative, 3)}</b>. This is what separates a real
-              preference from rating everything highly.
-            </li>
-            <li>
-              <b>Blend</b> = {t.formula} = <b>{dp(t.blended, 3)}</b>
-            </li>
-            {t.activityBonus ? (
-              <li>
-                <b>Activity bonus</b> for “{t.activityLabel}” = +{dp(t.activityBonus, 3)} (capped at
-                0.12, so it can separate two close strands but not overturn your ratings)
-              </li>
-            ) : null}
-            <li>
-              <b>Final</b> = {dp(t.final, 3)} → shown as <b>{top.match}%</b>
-            </li>
-          </ul>
-        </>
-      ) : (
-        <ul className="sp-steps">
-          <li>Your average rating = <b>{dp(t.average, 3)}</b></li>
-          <li>Spread (standard deviation) of your seven ratings = <b>{dp(t.spread, 3)}</b></li>
-          <li>Evenness = 1 − (spread ÷ {t.spreadReference}) = <b>{dp(t.evenness, 3)}</b></li>
-          <li>{t.formula} = <b>{dp(t.blended, 3)}</b> → shown as <b>{top.match}%</b></li>
-          <li className="sp-steps-note">
-            GAS is scored on evenness rather than trait weights because it is the strand for
-            students who have not narrowed down. A flat profile scores highest here.
-          </li>
-        </ul>
-      )}
-
-      <span className="sp-chip-label sp-quiz-section">Step 2 — all five strands</span>
+      <span className="sp-chip-label sp-quiz-section">Step 1 — your answers, as the model sees them</span>
       <div className="sp-mtable-wrap">
         <table className="sp-mtable">
-          <thead><tr><th>Strand</th><th>Score</th><th>Match</th></tr></thead>
+          <thead><tr><th>Feature</th><th>Your answer</th><th>Value fed to the tree</th></tr></thead>
           <tbody>
-            {result.strands.map((x) => (
-              <tr key={x.id}>
-                <td>{x.name}</td>
-                <td>{dp(x.score, 3)}</td>
-                <td>{x.match}%</td>
+            {MODEL.feature_order.map((f, i) => (
+              <tr key={f}>
+                <td>{f}</td>
+                <td>{i < MODEL.numeric_features.length ? p.encoded[i] : activityLabel(result.activity)}</td>
+                <td>{p.encoded[i]}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <p className="sp-steps-note">
+        The seven ratings pass through unchanged. The activity is turned into a number by its
+        position in the list the model was trained on ({MODEL.categorical.categories.join(", ")}).
+      </p>
 
-      <span className="sp-chip-label sp-quiz-section">Step 3 — {career.title}</span>
+      <span className="sp-chip-label sp-quiz-section">
+        Step 2 — the path down the tree ({p.path.length} comparison{p.path.length === 1 ? "" : "s"})
+      </span>
+      <div className="sp-mtable-wrap">
+        <table className="sp-mtable">
+          <thead><tr><th>Node</th><th>Test</th><th>Your value</th><th>Result</th><th>Rows here</th></tr></thead>
+          <tbody>
+            {p.path.map((step, i) => (
+              <tr key={i}>
+                <td>{step.node}</td>
+                <td>{step.feature} ≤ {dp(step.threshold, 2)}</td>
+                <td>{dp(step.observed, 2)}</td>
+                <td>{step.goLeft ? "yes → left" : "no → right"}</td>
+                <td>{step.samples}</td>
+              </tr>
+            ))}
+            <tr className="sp-mtable-sum">
+              <td>{p.leaf}</td>
+              <td colSpan={3}>leaf reached → <b>{p.strand}</b></td>
+              <td>{p.leafSamples}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <span className="sp-chip-label sp-quiz-section">Step 3 — what that leaf contains</span>
+      <div className="sp-mtable-wrap">
+        <table className="sp-mtable">
+          <thead><tr><th>Strand</th><th>Share of the leaf</th><th>Shown as</th></tr></thead>
+          <tbody>
+            {p.ranked.map((r) => (
+              <tr key={r.label}>
+                <td>{r.label}</td>
+                <td>{dp(r.score, 3)}</td>
+                <td>{Math.round(r.score * 100)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="sp-steps-note">
+        The confidence is simply how much of that leaf is one strand — {p.leafSamples} training row
+        {p.leafSamples === 1 ? "" : "s"} ended up here, and {Math.round(p.confidence * 100)}% of them
+        were {p.strand}. Exported model checksum {MODEL.sha256.slice(0, 16)}…
+      </p>
+
+      <span className="sp-chip-label sp-quiz-section">Step 4 — {career.title}</span>
       <ul className="sp-steps">
+        <li className="sp-steps-note">
+          Careers are SmartPath's own layer on top of the model — the tree predicts the strand, and
+          this ranks jobs within it. It is scored, not trained.
+        </li>
         <li>
-          <b>Trait fit</b> = the same calculation against the traits this job uses ={" "}
+          <b>Trait fit</b> = your ratings weighted by the traits this job uses ={" "}
           <b>{dp(career.trace.traitFit, 3)}</b>
         </li>
         <li>
@@ -932,9 +926,24 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustment
 
   /* Scoring is instant arithmetic, so the result recomputes as they adjust
      rather than waiting behind a request. */
+  /* The strand comes from the trained decision tree; the career ranking is
+     SmartPath's own layer, scored against the strand the model chose. The
+     model is never adjusted — student feedback only moves the career
+     weights. */
+  const prediction = useMemo(
+    () => (answered ? predict({ ...quiz, preferred_activity: activity }) : null),
+    [quiz, activity, answered]
+  );
+
   const result = useMemo(
-    () => (answered ? recommend({ ...quiz, preferred_activity: activity }, { adjustments }) : null),
-    [quiz, activity, answered, adjustments]
+    () =>
+      answered
+        ? recommend({ ...quiz, preferred_activity: activity }, {
+            adjustments,
+            strandScores: prediction.probabilities,
+          })
+        : null,
+    [quiz, activity, answered, adjustments, prediction]
   );
 
   /* Feedback is evidence about this student, so it is stored with their work
@@ -972,8 +981,8 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustment
           <h3 className="sp-quiz-title">Which strand suits you?</h3>
           <p className="sp-quiz-sub">
             {visible
-              ? top.name + " fits your answers best (" + top.match + "%). Open to change them."
-              : "Eight quick questions, scored on this device. No account, no waiting."}
+              ? "The trained model predicts " + top.name + " (" + top.match + "%). Open to change your answers."
+              : "Eight questions, scored by SmartPath's own trained decision tree, on this device."}
           </p>
         </div>
         <span className={"sp-quiz-caret" + (open ? " is-open" : "")}>
@@ -1014,8 +1023,8 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustment
               onChange={(e) => set("preferred_activity", e.target.value)}
             >
               <option value="">Choose one…</option>
-              {ACTIVITIES.map((a) => (
-                <option key={a.value} value={a.value}>{a.label}</option>
+              {MODEL_ACTIVITIES.map((v) => (
+                <option key={v} value={v}>{activityLabel(v)}</option>
               ))}
             </select>
           </Field>
@@ -1034,10 +1043,18 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustment
           <div className="sp-quiz-verdict">
             <span className="sp-chip-label">Best fit</span>
             <strong className="sp-quiz-strand">{top.name}</strong>
-            <span className="sp-quiz-conf">{top.match}% match</span>
+            <span className="sp-quiz-conf">{top.match}% confidence</span>
           </div>
           <p className="sp-quiz-full">{top.full}</p>
-          <p className="sp-why">{top.why}</p>
+          <p className="sp-why">
+            Predicted by the AutoTrain decision tree trained for this project, running here in your
+            browser. It reached this answer in {prediction.path.length} comparison
+            {prediction.path.length === 1 ? "" : "s"}, ending at a leaf built from{" "}
+            {prediction.leafSamples} of the {MODEL.tree.n_node_samples[0]} training rows.
+            {prediction.unknownActivity
+              ? " Note: the activity you picked was not in the training data."
+              : ""}
+          </p>
 
           {suggested ? (
             <div className="sp-actions">
@@ -1060,7 +1077,9 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustment
             </p>
           )}
 
-          <span className="sp-chip-label sp-quiz-section">All five strands</span>
+          <span className="sp-chip-label sp-quiz-section">
+            All five strands, as the model scored them
+          </span>
           <ul className="sp-quiz-ranked">
             {result.strands.map((s) => (
               <li key={s.id}>
@@ -1069,12 +1088,7 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustment
                   <span className="sp-compare-fill" style={{ width: s.match + "%" }} />
                 </span>
                 <span className="sp-quiz-rpct">{s.match}%</span>
-                <p className="sp-quiz-reason">
-                  {s.why}
-                  {s.adjusted ? <span className="sp-tuned"> Adjusted by your feedback.</span> : null}
-                </p>
-                <Feedback onYes={() => feedback("strand", s.id, 1)}
-                  onNo={() => feedback("strand", s.id, -1)} />
+                <p className="sp-quiz-reason">{s.blurb}</p>
               </li>
             ))}
           </ul>
@@ -1113,7 +1127,7 @@ function StrandQuiz({ quiz, setQuiz, shown, setShown, adjustments, setAdjustment
             ) : null}
           </div>
 
-          {maths ? <Maths result={result} /> : null}
+          {maths ? <Maths result={result} prediction={prediction} /> : null}
 
           <p className="sp-fineprint">
             Scored on this device from your eight answers — no account, no internet, and the same
@@ -1199,7 +1213,12 @@ function MatchTab({ profile, setProfile, careers, setCareers, chosen, setChosen,
          offline suggestions for the personalised ones. */
       const answered = ACTIVITY_VALUES.includes(quiz.preferred_activity);
       if (answered) {
-        const local = localCareerCards(quiz, { adjustments });
+        /* Rank the offline set against the trained model's strand too, so the
+           fallback cannot disagree with the prediction shown above it. */
+        const local = localCareerCards(quiz, {
+          adjustments,
+          strandScores: predict(quiz).probabilities,
+        });
         setCareers(local);
         setUsedLocal(true);
         const stillThere = local.some((c) => c.title === chosen);

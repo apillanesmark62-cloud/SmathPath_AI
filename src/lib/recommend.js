@@ -699,7 +699,23 @@ export function recommend(answers, options) {
   const activityDef = activity ? ACTIVITY_BY_VALUE[activity] : null;
   const bonuses = activityDef ? activityDef.bonus : {};
 
-  const strands = STRANDS.map((strand) => {
+  /* When the trained model has already decided the strand, its scores are
+     the ones to rank careers against. The heuristic below then serves only
+     as a fallback for a questionnaire the model has not been given. */
+  const supplied = opts.strandScores;
+
+  const strands = supplied
+    ? STRANDS.map((strand) => ({
+        id: strand.id,
+        name: strand.name,
+        full: strand.full,
+        blurb: strand.blurb,
+        score: clamp01(supplied[strand.id] || 0),
+        match: pct(clamp01(supplied[strand.id] || 0)),
+        fromModel: true,
+        adjusted: false,
+      })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+    : STRANDS.map((strand) => {
     const effective = strand.weights
       ? effectiveWeights(strand.weights, adj.strandWeights[strand.id])
       : null;
