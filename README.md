@@ -328,6 +328,21 @@ disabled) the app falls back to in-memory storage and works for that visit
 only.
 
 This means data lives on one device and one browser — it does not sync, and
-clearing site data erases it. The sign-in is a school-project login for keeping
-work separate on a shared device, not real security: passcodes are stored in
-plain text in localStorage, so nobody should reuse a real password.
+clearing site data erases it.
+
+**There is no login.** The app opens on a single field: type your name and
+start. The name is matched case-insensitively and with runs of whitespace
+collapsed, so "Maria Santos", "maria santos" and "  maria   santos  " are all
+the same student, but it is stored as typed so the app can greet them
+properly. **Not you?** in the sidebar (or the top bar on phones) returns to
+that screen so the next person gets their own space.
+
+This replaced a username-and-passcode sign-in that stored the passcode in
+**plain text** in localStorage — security theatre that also invited students
+to reuse a real password. What it was actually for was keeping two students'
+work apart on a shared school computer, and a name does that just as well
+while promising nothing it cannot keep.
+
+Accounts created under the old sign-in still work: type the same username and
+the saved work loads. Entering rewrites the record without the `pin` field, so
+the stored passcode is deleted the first time that student comes back.

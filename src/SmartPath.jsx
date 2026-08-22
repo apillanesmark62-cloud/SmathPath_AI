@@ -441,7 +441,7 @@ const STATIONS = [
   { id: "advice", name: "Ask SmartPath", short: "Ask", icon: "chat" },
 ];
 
-function Rail({ tab, setTab, done, user, onSignOut, theme, onToggleTheme }) {
+function Rail({ tab, setTab, done, user, onSwitch, theme, onToggleTheme }) {
   return (
     <aside className="sp-rail">
       <div>
@@ -469,37 +469,45 @@ function Rail({ tab, setTab, done, user, onSignOut, theme, onToggleTheme }) {
         </ol>
       </div>
       <div className="sp-rail-foot">
-        <span className="sp-user">Signed in as {user}</span>
-        <button className="sp-link" onClick={onSignOut}>Sign out</button>
+        <span className="sp-user">You are {user}</span>
+        <button className="sp-link" onClick={onSwitch}>Not you?</button>
       </div>
     </aside>
   );
 }
 
-/* ---------------- sign in ---------------- */
-function AuthScreen({ onSignedIn }) {
-  const [mode, setMode] = useState("signup");
-  const [username, setUsername] = useState("");
-  const [pin, setPin] = useState("");
+/* ---------------- who is using it ---------------- */
+/* No password, on purpose.
+
+   The old screen asked for a username and a passcode, and stored that
+   passcode in plain text in localStorage — security theatre that also
+   invited students to reuse a real password. What it was actually for was
+   keeping two students' work apart on a shared school computer, and a name
+   does that just as well while promising nothing it cannot keep.
+
+   Names are matched case-insensitively so "Maria" and "maria" are the same
+   person, but stored as typed so the app can greet them properly. */
+function NameScreen({ onEntered }) {
+  const [name, setName] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function submit() {
-    const u = username.trim().toLowerCase();
-    if (u.length < 3) return setMsg("Use a username with at least 3 characters.");
-    if (pin.length < 4) return setMsg("Use a passcode with at least 4 characters.");
-    setBusy(true); setMsg("");
-    const existing = await store.get("account:" + u);
-    if (mode === "signup") {
-      if (existing) { setBusy(false); return setMsg("That username is taken. Sign in instead, or pick another."); }
-      await store.set("account:" + u, { username: u, pin, createdAt: Date.now() });
-    } else {
-      if (!existing) { setBusy(false); return setMsg("No account with that username. Create one first."); }
-      if (existing.pin !== pin) { setBusy(false); return setMsg("That passcode does not match."); }
-    }
-    await store.set("session", { username: u });
+  async function enter() {
+    const typed = name.trim().replace(/\s+/g, " ");
+    if (typed.length < 2) return setMsg("Type your name to continue.");
+    setBusy(true);
+    setMsg("");
+
+    const key = typed.toLowerCase();
+    const existing = await store.get("account:" + key);
+    await store.set("account:" + key, {
+      username: key,
+      name: typed,
+      createdAt: (existing && existing.createdAt) || Date.now(),
+    });
+    await store.set("session", { username: key });
     setBusy(false);
-    onSignedIn(u);
+    onEntered(key);
   }
 
   return (
@@ -528,28 +536,27 @@ function AuthScreen({ onSignedIn }) {
           resume you can hand in, and drills you on interview questions.
         </p>
 
-        <div className="sp-tabs">
-          <button className={"sp-tab" + (mode === "signup" ? " is-on" : "")} onClick={() => setMode("signup")}>Create account</button>
-          <button className={"sp-tab" + (mode === "signin" ? " is-on" : "")} onClick={() => setMode("signin")}>Sign in</button>
-        </div>
-
-        <Field label="Username">
-          <input className="sp-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="e.g. maria.santos" autoComplete="off" />
-        </Field>
-        <Field label="Passcode" hint="Make up a new one. Never reuse a real password here.">
-          <input className="sp-input" type="password" value={pin} onChange={(e) => setPin(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="4 characters or more" />
+        <Field label="Your name" hint="Type the same name next time to pick up where you left off.">
+          <input
+            className="sp-input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && enter()}
+            placeholder="e.g. Maria Santos"
+            autoComplete="name"
+            autoFocus
+          />
         </Field>
 
         {msg ? <Notice kind="error">{msg}</Notice> : null}
 
-        <button className="sp-btn sp-btn-primary sp-btn-wide" onClick={submit} disabled={busy}>
-          {busy ? "Working…" : mode === "signup" ? "Create account" : "Sign in"}
+        <button className="sp-btn sp-btn-primary sp-btn-wide" onClick={enter} disabled={busy}>
+          {busy ? "Opening…" : name.trim() ? "Start as " + name.trim().replace(/\s+/g, " ") : "Start"}
         </button>
 
         <p className="sp-fineprint">
-          This sign-in keeps your work separate on this device. It is a school-project login, not
-          real security, so keep sensitive details out.
+          No password and no account. Your name simply keeps your work separate from anyone else
+          using this device, and everything stays in this browser.
         </p>
       </div>
     </div>
@@ -1926,6 +1933,7 @@ function AdviceTab({ profile, chosen, chat, setChat, save }) {
 /* ---------------- app ---------------- */
 export default function SmartPath() {
   const [user, setUser] = useState(null);
+  const [displayName, setDisplayName] = useState("");
   const [ready, setReady] = useState(false);
   /* Theme is a device preference, not a per-account one, so it lives outside
      the signed-in data and survives sign-out. */
@@ -1964,6 +1972,10 @@ export default function SmartPath() {
   }
 
   async function loadUser(u) {
+    const account = await store.get("account:" + u);
+    /* Accounts made by the old sign-in have no stored name; fall back to the
+       key so returning students still see something sensible. */
+    setDisplayName((account && account.name) || u);
     const d = (await store.get("data:" + u)) || {};
     setProfile({ ...blankProfile, ...(d.profile || {}) });
     setCareers(d.careers || []);
@@ -1990,9 +2002,9 @@ export default function SmartPath() {
     });
   }
 
-  async function signOut() {
+  async function switchStudent() {
     await store.set("session", {});
-    setUser(null); setProfile(blankProfile); setCareers([]); setChosen("");
+    setUser(null); setDisplayName(""); setProfile(blankProfile); setCareers([]); setChosen("");
     setRoadmap(null); setResume(blankResume); setBuilt(null); setPrep(null);
     setScores({}); setChat([]); setQuiz(blankQuiz); setQuizShown(false); setAdjustments(emptyAdjustments()); setTab("home");
   }
@@ -2010,19 +2022,19 @@ export default function SmartPath() {
     return (<div className="sp-root" data-theme={theme}><Styles /><div className="sp-boot"><span className="sp-pulse" /> Loading SmartPath…</div></div>);
 
   if (!user)
-    return (<div className="sp-root" data-theme={theme}><Styles /><AuthScreen onSignedIn={loadUser} /></div>);
+    return (<div className="sp-root" data-theme={theme}><Styles /><NameScreen onEntered={loadUser} /></div>);
 
   return (
     <div className="sp-root sp-app" data-theme={theme}>
       <Styles />
-      <Rail tab={tab} setTab={setTab} done={done} user={user} onSignOut={signOut}
+      <Rail tab={tab} setTab={setTab} done={done} user={displayName || user} onSwitch={switchStudent}
         theme={theme} onToggleTheme={toggleTheme} />
 
       <div className="sp-mobilebar">
         <span className="sp-mark sp-mark-small">SmartPath</span>
         <div className="sp-mobilebar-actions">
           <ThemeSwitch theme={theme} onToggle={toggleTheme} className="sp-themeswitch-onpanel" />
-          <button className="sp-link" onClick={signOut}>Sign out</button>
+          <button className="sp-link" onClick={switchStudent}>Not you?</button>
         </div>
       </div>
 
